@@ -1,0 +1,67 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "screen-agent"
+version = "0.1.0"
+description = "MCP server that gives an AI eyes (screenshot/video) and hands (mouse+keyboard) on the local desktop. Linux/Wayland, Linux/X11, macOS, Windows."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+keywords = ["mcp", "model-context-protocol", "screenshot", "screen-capture", "automation", "wayland", "x11", "macos", "windows", "ai", "computer-use"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Environment :: X11 Applications",
+  "Environment :: MacOS X",
+  "Environment :: Win32 (MS Windows)",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Graphics :: Capture",
+  "Topic :: Software Development :: Testing",
+]
+dependencies = [
+  "mcp>=2.0",
+]
+
+[project.optional-dependencies]
+# GNOME / Mutter screen capture + input injection over D-Bus (pure-python client)
+mutter = ["dbus-next>=0.2.3"]
+# image helpers: screenshot downscaling, macOS/Windows capture
+image = ["pillow>=9.2"]
+# faster/cleaner X11 capture
+mss = ["mss>=6.1"]
+all = ["dbus-next>=0.2.3", "pillow>=9.2", "mss>=6.1"]
+dev = ["pytest>=7.4", "ruff>=0.6"]
+
+[project.scripts]
+screen-agent = "screen_agent.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/example/screen-agent"
+Issues = "https://github.com/example/screen-agent/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/screen_agent"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "LICENSE"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

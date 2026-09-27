@@ -14,3 +14,4 @@ htmlcov/
 *.webm
 *.mov
 .DS_Store
+.vscode/

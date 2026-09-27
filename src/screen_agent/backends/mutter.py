@@ -79,6 +79,11 @@ _MODS = {
     "meta": 0xFFE7, "fn": 0xFFBE, "hyper": 0xFFED,
 }
 
+#: keysyms that are only reachable with Shift held on a US layout
+_NEEDS_SHIFT = frozenset(
+    {ord(c) for c in "~!@#$%^&*()_+{}|:\"<>?"} | {ord(c) for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"}
+)
+
 _CURSOR_SHAPES = {
     Cursor.DEFAULT: "default", Cursor.POINTER: "pointer", Cursor.HAND: "pointer",
     Cursor.TEXT: "text", Cursor.CROSSHAIR: "crosshair", Cursor.WAIT: "wait",
@@ -345,15 +350,23 @@ class MutterBackend(Backend):
         typed = 0
         for ch in text:
             keysym = _KEYSYMS.get(ch)
+            if keysym is None and ch in ("\n", "\r"):
+                keysym = _KEYSYMS["return"]
+            elif keysym is None and ch == "\t":
+                keysym = _KEYSYMS["tab"]
             if keysym is None:
-                if ch in ("\n", "\r"):
-                    keysym = _KEYSYMS["return"]
-                elif ch == "\t":
-                    keysym = _KEYSYMS["tab"]
-                else:
-                    continue
+                continue
+            # Upper-case letters and shifted symbols need Shift held; Mutter derives
+            # the keycode from the keysym, so the modifier has to be explicit.
+            shift = keysym in _NEEDS_SHIFT
+            if shift:
+                await rd.call_notify_keyboard_keysym(_MODS["shift"], True)
+                await asyncio.sleep(0.01)
             await rd.call_notify_keyboard_keysym(keysym, True)
+            await asyncio.sleep(0.01)
             await rd.call_notify_keyboard_keysym(keysym, False)
+            if shift:
+                await rd.call_notify_keyboard_keysym(_MODS["shift"], False)
             typed += 1
             if interval:
                 await asyncio.sleep(interval)
@@ -373,15 +386,15 @@ class MutterBackend(Backend):
                 await rd.call_notify_keyboard_keysym(keysym, True)
                 held.append(keysym)
                 await asyncio.sleep(0.015)
-            keysym = _KEYSYMS.get(parsed.key.lower() if parsed.is_named else parsed.key)
-            if keysym is None and parsed.is_named:
-                keysym = _KEYSYMS.get(parsed.key)
+            # A main key may itself be a modifier (key_press("super") opens the
+            # Activities overview), so look in both tables.
+            keysym = _KEYSYMS.get(parsed.key) or _MODS.get(parsed.key)
             if keysym is None:
                 raise ScreenAgentError(
                     f"no keysym for {parsed.key!r} on this keyboard layout"
                 )
             await rd.call_notify_keyboard_keysym(keysym, True)
-            await asyncio.sleep(0.012)
+            await asyncio.sleep(0.02)
             await rd.call_notify_keyboard_keysym(keysym, False)
         finally:
             for keysym in reversed(held):

@@ -86,8 +86,16 @@ NAMED_KEYS = {
 NAMED_KEYS.update({f"f{i}": f"f{i}" for i in range(1, 25)})
 # keypad digits: 'kp0' .. 'kp9'
 NAMED_KEYS.update({f"kp{i}": f"kp{i}" for i in range(10)})
-# a few aliases people type
-NAMED_KEYS["return_"] = "return"
+# Modifier keys are also pressable on their own - Super alone opens the Activities
+# overview on GNOME, which an agent needs for launching apps.
+NAMED_KEYS.update(
+    {
+        "super": "super", "meta": "meta", "win": "super", "windows": "super",
+        "command": "super", "cmd": "super", "gui": "meta", "logo": "meta",
+        "ctrl": "ctrl", "control": "ctrl", "alt": "alt", "option": "alt",
+        "shift": "shift", "fn": "fn", "hyper": "hyper",
+    }
+)
 
 
 def canonical_modifier(name: str) -> str:

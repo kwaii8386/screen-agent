@@ -25,6 +25,13 @@ DESKTOP = Rect(0, 0, 1920, 1080)
 
 
 # --------------------------------------------------------------------- regions
+def test_rect_unpacks_like_a_tuple():
+    """Backends do `bx, by, bw, bh = self.desktop`, so Rect must be iterable."""
+    x, y, w, h = Rect(0, 0, 1920, 1080)
+    assert (x, y, w, h) == (0, 0, 1920, 1080)
+    assert tuple(Rect(5, 6, 7, 8)) == (5, 6, 7, 8)
+
+
 def test_full_region_is_the_whole_desktop():
     assert parse_region("full", DESKTOP) == DESKTOP
     assert parse_region("", DESKTOP) == DESKTOP
@@ -94,6 +101,28 @@ def test_modifier_aliases():
 
 def test_duplicate_modifiers_collapse():
     assert parse_combo("ctrl+ctrl+a").modifiers == ("ctrl",)
+
+
+def test_modifier_keys_are_pressable_on_their_own():
+    """key_press("super") opens the Activities overview, so it must parse as a key."""
+    for name, expected in [("super", "super"), ("win", "super"), ("cmd", "super"),
+                           ("ctrl", "ctrl"), ("shift", "shift"), ("alt", "alt")]:
+        combo = parse_combo(name)
+        assert combo.is_named, name
+        assert combo.key == expected
+        assert combo.modifiers == ()
+
+
+def test_mutter_keysym_tables_cover_every_parsed_key():
+    """Every key the parser accepts must resolve to a keysym on the mutter backend."""
+    from screen_agent.backends.mutter import _KEYSYMS, _MODS, _NEEDS_SHIFT  # noqa: PLC0415
+
+    for text in ["a", "Z", "5", "/", "?", "~", "Return", "F7", "kp3", "super",
+                 "ctrl", "alt", "shift", "space", "escape", "left", "pageup"]:
+        combo = parse_combo(text)
+        assert _KEYSYMS.get(combo.key) or _MODS.get(combo.key), f"no keysym for {text!r}"
+    # uppercase must require shift, lowercase must not
+    assert ord("A") in _NEEDS_SHIFT and ord("a") not in _NEEDS_SHIFT
 
 
 def test_unknown_key_is_rejected():

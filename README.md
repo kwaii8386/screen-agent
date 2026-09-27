@@ -207,7 +207,36 @@ and drops synthetic events.
 
 ---
 
+## Lessons from real-desktop testing
+
+Driving a live GNOME 46 session end-to-end (open an app from the Activities overview,
+type a 32-character search query, press Enter, read the results page) surfaced things a
+unit test never would:
+
+* **Activities swallows keystrokes.** Typing `firefox` into the GNOME overview produced
+  `fic` — the shell grabs the first few characters while it is still building its search
+  provider list, and the rest are dropped. Typing `brave` (5 characters) worked. When
+  driving the overview, type in small chunks and screenshot to confirm, or launch apps
+  from the dock instead.
+* **There is no focus concept in the tool API.** `mouse_click(x, y)` is a coordinate, so
+  nothing tells the agent which window receives it. After a click lands on a window that
+  immediately closes (an overview, a transient popup), the *next* click is delivered to
+  whatever is underneath. This produced several wrong-window clicks during testing. An
+  agent must screenshot before every click and verify which window it is addressing.
+* **Scrolling near screen edges triggers shell gestures.** `mouse_scroll` with the pointer
+  near the bottom edge opened the Activities overview on GNOME instead of scrolling the
+  page. Keep the pointer inside the content area, and prefer `key_press("pagedown")` when
+  the target is a web page — it is more predictable than wheel events.
+* **`super` is a usable standalone key.** `key_press("super")` toggles the overview and
+  `key_press("super")` again closes it; `Escape` did *not* close the overview in testing.
+* **Uppercase and shifted symbols need Shift held explicitly.** Mutter derives the keycode
+  from the keysym, so a bare keysym for `A` or `!` does not produce the shifted character.
+  The backend holds Shift for the characters that need it, which is why
+  `type_text("Hello World 42!@#")` came out exactly right.
+
 ## Implementation notes
+
+
 
 **Why absolute pointer motion is emulated on GNOME.**
 Mutter 46 answers `NotifyPointerMotionAbsolute` with `Failed: No screen cast active` for

@@ -47,6 +47,10 @@ class Rect:
     w: int
     h: int
 
+    def __iter__(self):
+        """Allow ``x, y, w, h = rect`` like the tuple this replaced."""
+        return iter((self.x, self.y, self.w, self.h))
+
     def __str__(self) -> str:  # pragma: no cover - cosmetic
         return f"{self.w}x{self.h}+{self.x}+{self.y}"
 

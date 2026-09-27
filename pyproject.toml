@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "screen-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server that gives an AI eyes (screenshot/video) and hands (mouse+keyboard) on the local desktop. Linux/Wayland, Linux/X11, macOS, Windows."
 readme = "README.md"
 license = { text = "MIT" }
@@ -28,8 +28,9 @@ classifiers = [
   "Topic :: Multimedia :: Graphics :: Capture",
   "Topic :: Software Development :: Testing",
 ]
+# 1.x (FastMCP) and 2.x (MCPServer) are both supported - see mcp_server._server_class
 dependencies = [
-  "mcp>=2.0",
+  "mcp>=1.16",
 ]
 
 [project.optional-dependencies]

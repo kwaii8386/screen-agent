@@ -145,8 +145,13 @@ async def _shot(args: argparse.Namespace) -> int:
 
 async def _record(args: argparse.Namespace) -> int:
     backend = load_backend(args.backend or None)
+    # the backend picks the container it can actually write (webm/mp4, or an animated
+    # png when ffmpeg is missing) and returns the real path
     target = _out(args.path, ".webm")
     result = await backend.record_video(target, args.seconds)
+    if not result.exists():
+        print(f"error: the recorder produced no file at {result}", file=sys.stderr)
+        return 1
     print(f"{result} ({result.stat().st_size / 1024:.0f} KiB)")
     return 0
 

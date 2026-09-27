@@ -7,12 +7,11 @@ Capture tries, in order: ``mss`` (pure python, fast), ``import`` (ImageMagick),
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import tempfile
 from pathlib import Path
 
-from ..core import Rect, ScreenAgentError, UnsupportedOperation, run, run_capture
+from ..core import Rect, ScreenAgentError, UnsupportedOperation, run, run_capture, scroll_delta
 from .base import Backend, BackendInfo, Cursor
 
 __all__ = ["X11Backend"]
@@ -119,7 +118,7 @@ class X11Backend(Backend):
             await run(
                 "import", "-window", "root",
                 "-crop", f"{rect.w}x{rect.h}+{rect.x}+{rect.y}",
-                f"+repage", str(path),
+                "+repage", str(path),
                 timeout=20,
             )
         elif tool == "ffmpeg":
@@ -229,15 +228,13 @@ class X11Backend(Backend):
         await run("xdotool", "mouseup", str(number))
 
     async def scroll(self, amount: int = 3, direction: str = "down", horizontal: bool = False) -> None:
-        button = "6" if horizontal else "5"  # 4/5 vertical, 6/7 horizontal
-        d = direction.strip().lower()
-        n = abs(int(amount))
-        if d in ("up", "left"):
-            button = "4" if not horizontal else "7"
-        elif d not in ("down", "right"):
-            raise ScreenAgentError("direction must be up/down (left/right when horizontal=True)")
-        for _ in range(n):
-            await run("xdotool", "click", "--repeat", "1", button)
+        # X11 buttons: 4/5 are vertical up/down, 6/7 horizontal left/right
+        n = scroll_delta(int(amount), direction, horizontal)
+        button = {False: {"up": 4, "down": 5}, True: {"up": 6, "down": 7}}[horizontal][
+            "up" if n > 0 else "down"
+        ]
+        for _ in range(abs(n)):
+            await run("xdotool", "click", "--repeat", "1", str(button))
             await asyncio_sleep(0.05)
 
     # ---------------------------------------------------------------- keyboard

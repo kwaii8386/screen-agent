@@ -20,7 +20,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from ..core import Rect, ScreenAgentError, UnsupportedOperation, run
+from ..core import Rect, ScreenAgentError, UnsupportedOperation, run, scroll_delta
 from .base import Backend, BackendInfo, Cursor
 
 __all__ = ["MacOSBackend"]
@@ -34,7 +34,7 @@ _MOUSE_MOVED = 0x0
 _SCROLL = 0x0
 
 _HID_EVENT_TAP = 0
-_LEFT_DOWN, LEFT_UP, RIGHT_DOWN, RIGHT_UP, MID_DOWN, MID_UP = 1, 2, 3, 4, 25, 26
+_LEFT_DOWN, _LEFT_UP, _RIGHT_DOWN, _RIGHT_UP, _MID_DOWN, _MID_UP = 1, 2, 3, 4, 25, 26
 _MOVE_ABS = 0x1  # kCGEventFlagMaskAbsolute
 
 _MODIFIER_FLAGS = {
@@ -130,9 +130,12 @@ class MacOSBackend(Backend):
 
     # ---------------------------------------------------------------- geometry
     def _query_desktop(self) -> Rect:
-        """Ask the window server for the main display size, and read Retina scaling."""
+        """Ask the window server for the main display size, in physical pixels."""
         try:
-            from Quartz import CGDisplayPixelsWide  # type: ignore[import-not-found]
+            from Quartz import (  # type: ignore[import-not-found]
+                CGDisplayPixelsHigh,
+                CGDisplayPixelsWide,
+            )
 
             return Rect(0, 0, int(CGDisplayPixelsWide(0)), int(CGDisplayPixelsHigh(0)))
         except Exception:  # noqa: BLE001
@@ -292,15 +295,11 @@ class MacOSBackend(Backend):
 
     async def scroll(self, amount: int = 3, direction: str = "down", horizontal: bool = False) -> None:
         cg = self._core_graphics()
-        d = direction.strip().lower()
-        n = abs(int(amount))
-        if d in ("up", "left"):
-            n = -n
-        elif d not in ("down", "right"):
-            raise ScreenAgentError("direction must be up/down (left/right when horizontal=True)")
+        # positive == up (right when horizontal), the same sign every backend uses
+        n = scroll_delta(int(amount), direction, horizontal)
         src = cg.CGEventSourceCreate(_HID_EVENT_TAP)
         ev = cg.CGEventCreateScrollWheelEvent(
-            src, _SCROLL, 2 if horizontal else 1, int(n), 0
+            src, _SCROLL, 2 if horizontal else 1, n, 0
         )
         cg.CGEventPost(_HID_EVENT_TAP, ev)
 
@@ -334,7 +333,6 @@ class MacOSBackend(Backend):
                 self._post_key(_KEYCODES["tab"], False)
             else:
                 self._post_text(ch)
-            count = 1
             if interval:
                 await asyncio.sleep(interval)
         return len(text)

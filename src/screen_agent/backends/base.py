@@ -59,7 +59,7 @@ class BackendInfo:
         return "\n".join(lines)
 
 
-class Backend(abc.ABC):
+class Backend(abc.ABC):  # noqa: B024 - a template base: every method has a default that raises
     """Base class for all backends.
 
     Subclasses must implement every method; raise

@@ -12,7 +12,7 @@ import os
 import shutil
 from pathlib import Path
 
-from ..core import Rect, ScreenAgentError, UnsupportedOperation, run, run_capture
+from ..core import Rect, ScreenAgentError, UnsupportedOperation, run, run_capture, scroll_delta
 from .base import Backend, BackendInfo, Cursor
 
 __all__ = ["WaylandToolsBackend"]
@@ -206,18 +206,14 @@ class WaylandToolsBackend(Backend):
     async def scroll(self, amount: int = 3, direction: str = "down", horizontal: bool = False) -> None:
         await self._ensure_ydaemon()
         tool = _input_tool()
-        d = direction.strip().lower()
-        n = abs(int(amount))
-        if d in ("up", "left"):
-            n = -n
-        elif d not in ("down", "right"):
-            raise ScreenAgentError("direction must be up/down (left/right when horizontal=True)")
+        n = scroll_delta(int(amount), direction, horizontal)  # positive == up
+        # evdev wheel: 0xC5 vertical, 0xC6 horizontal, +3 is the matching down button
         btn = 0xC5 if not horizontal else 0xC6
         if n < 0:
-            btn = 0xC5 + 3 if not horizontal else 0xC6 + 3
+            btn += 3
         if tool not in ("ydotool", "dotool"):
             raise UnsupportedOperation("scrolling needs ydotool or dotool")
-        for _ in range(n):
+        for _ in range(abs(n)):
             await run(tool, str(btn), timeout=10)
             await run(tool, str(btn + 1), timeout=10)
             await asyncio.sleep(0.05)

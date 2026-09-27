@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 from pathlib import Path
 from typing import Any
-
-from mcp.server.mcpserver import MCPServer
 
 from . import __version__
 from .backends import Backend, load_backend
@@ -31,16 +30,30 @@ change their session, so only perform actions the user asked for, prefer screens
 before acting, and verify afterwards.\
 """
 
-_TOOLS: dict[str, dict[str, Any]] = {}
+def _server_class() -> tuple[type, bool]:
+    """The MCP server class, for either major version of the ``mcp`` SDK.
+
+    ``mcp`` 2.x renamed ``FastMCP`` to ``MCPServer`` and added a ``version`` argument;
+    1.x only has ``FastMCP(name, instructions)``. Both are supported, so the package
+    works with whichever one is installed instead of failing at import time.
+    """
+    try:  # mcp >= 2.0
+        from mcp.server.mcpserver import MCPServer  # noqa: PLC0415
+
+        return MCPServer, True
+    except ImportError:  # pragma: no cover - depends on the installed mcp
+        from mcp.server.fastmcp import FastMCP  # noqa: PLC0415
+
+        return FastMCP, False
 
 
-def build_server(backend: Backend | None = None) -> MCPServer:
+def build_server(backend: Backend | None = None) -> Any:
     """Create the MCP server, bound to *backend* (or an auto-detected one)."""
-    mcp = MCPServer(
-        name="screen-agent",
-        version=__version__,
-        instructions=INSTRUCTIONS,
-    )
+    server_class, takes_version = _server_class()
+    kwargs: dict[str, Any] = {"name": "screen-agent", "instructions": INSTRUCTIONS}
+    if takes_version and "version" in inspect.signature(server_class).parameters:
+        kwargs["version"] = __version__
+    mcp = server_class(**kwargs)
     state: dict[str, Backend | None] = {"backend": backend}
 
     def be() -> Backend:
@@ -48,16 +61,19 @@ def build_server(backend: Backend | None = None) -> MCPServer:
             state["backend"] = load_backend()
         return state["backend"]
 
-    def shot_path(path: str) -> Path:
+    def shot_path(path: str, suffix: str = ".png") -> Path:
         if path:
             p = Path(path).expanduser()
             if not p.is_absolute():
                 p = Path.cwd() / p
             p.parent.mkdir(parents=True, exist_ok=True)
+            if not p.suffix:
+                p = p.with_suffix(suffix)
             return p
         d = default_shot_dir()
         d.mkdir(parents=True, exist_ok=True)
-        return d / f"{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000}.png"
+        stamp = f"{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000}"
+        return d / f"{stamp}{suffix}"
 
     @mcp.tool()
     async def screen_info() -> str:
@@ -92,12 +108,19 @@ def build_server(backend: Backend | None = None) -> MCPServer:
 
     @mcp.tool()
     async def screen_record(seconds: float = 5.0, path: str = "") -> str:
-        """Record the whole screen to a video file for a few seconds and return its path."""
+        """Record the whole screen for a few seconds and return the file path.
+
+        The file is a .webm (or .mp4) when ffmpeg is installed; without it the Windows
+        backend writes an animated .png instead, so the returned path is authoritative.
+        """
         backend = be()
-        target = shot_path(path).with_suffix(".webm")
+        target = shot_path(path, ".webm")
         result = await backend.record_video(target, float(seconds))
         size_kb = result.stat().st_size / 1024
-        return f"Recorded {seconds:g}s to {result} ({size_kb:.0f} KiB)."
+        return (
+            f"Recorded {seconds:g}s to {result} ({size_kb:.0f} KiB). "
+            f"Read that file path to watch it."
+        )
 
     @mcp.tool()
     async def mouse_move(x: int, y: int, cursor: str = "default") -> str:
@@ -147,7 +170,13 @@ def build_server(backend: Backend | None = None) -> MCPServer:
 
     @mcp.tool()
     async def key_press(keys: str) -> str:
-        """Press a key or a combo: 'Return', 'Tab', 'Escape', 'ctrl+c', 'ctrl+shift+t', 'alt+F4'."""
+        """Press a key or a combo.
+
+        'Return', 'Tab', 'Escape', 'F5', the arrows, and the punctuation names
+        ('minus', 'plus', 'lbracket', 'comma', ...) all work, on their own or with
+        modifiers: 'ctrl+c', 'ctrl+shift+t', 'alt+F4'. A literal '+' is a key too, so
+        'ctrl++' means Ctrl and the plus sign.
+        """
         await be().key_press(keys)
         return f"Pressed {keys}."
 

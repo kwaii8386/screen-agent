@@ -142,12 +142,36 @@ class Combo:
 
 _SPLIT = re.compile(r"\s*[+]\s*|\s+")
 
+#: characters that are meaningful to the parser itself, so they can be asked for
+#: directly: key_press("+") and key_press(" ") are real key presses
+_LITERAL = {"+": "plus", " ": "space"}
+
 
 def parse_combo(text: str) -> Combo:
-    """Parse ``'ctrl+shift+t'`` / ``'alt+F4'`` / ``'Return'`` / ``'a'`` into a :class:`Combo`."""
-    parts = [p for p in _SPLIT.split(text.strip()) if p]
-    if not parts:
+    """Parse ``'ctrl+shift+t'`` / ``'alt+F4'`` / ``'Return'`` / ``'a'`` into a :class:`Combo`.
+
+    The literal characters ``+`` and ``space`` are accepted as the key itself, so
+    ``key_press("+")`` and ``key_press("ctrl++")`` mean what they look like; every other
+    key that needs an escape does not have one, because nothing else collides.
+    """
+    raw = text
+    stripped = text.strip()
+    if not stripped:
+        # a lone space is a perfectly good key press
+        if text in (" ", "\t"):
+            return Combo((), "space", raw=raw)
         raise ValueError("no key given")
+    if stripped in _LITERAL:
+        return Combo((), _LITERAL[stripped], raw=raw)
+    if stripped.endswith("+") and not stripped.endswith("++"):
+        raise ValueError(f"no key given after '+' in {text!r}")
+    if stripped.endswith("++") and len(stripped) > 2:  # 'ctrl++' -> ctrl and plus
+        head, key = stripped[:-1], "+"
+        parts = [*[p for p in _SPLIT.split(head) if p], key]
+    else:
+        parts = [p for p in _SPLIT.split(stripped) if p]
+        if not parts:
+            raise ValueError("no key given")
     *mods, main = parts
     modifiers: list[str] = []
     for m in mods:
@@ -156,7 +180,9 @@ def parse_combo(text: str) -> Combo:
             modifiers.append(mod)
     key = main.strip()
     low = key.lower()
-    if low in NAMED_KEYS:
+    if key in _LITERAL:
+        key = _LITERAL[key]
+    elif low in NAMED_KEYS:
         key = NAMED_KEYS[low]
     elif len(key) != 1 and not (low.startswith("kp") and low[2:].isdigit()):
         # allow 'kp5' and single characters only
@@ -164,4 +190,4 @@ def parse_combo(text: str) -> Combo:
             f"unknown key {main!r}; use a single character, a named key "
             f"(Return, Tab, Escape, F5, ...) or a modifier combo like ctrl+c"
         )
-    return Combo(tuple(modifiers), key, raw=text.strip())
+    return Combo(tuple(modifiers), key, raw=raw)

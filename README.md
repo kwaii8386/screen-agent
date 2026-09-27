@@ -46,11 +46,13 @@ Optional extras, installed only if you need them:
 | Extra | Pulls in | Needed for |
 | --- | --- | --- |
 | `mutter` | `dbus-next` | GNOME/Wayland screen capture and input |
-| `image` | `pillow` | downscaling, macOS/Windows capture |
+| `image` | `pillow` | faster `screenshot(scale=...)` and macOS capture fallbacks |
 | `mss` | `mss` | fast X11 capture |
 | `all` | everything above | — |
 
-`screen-agent` itself only hard-depends on `mcp`.
+`screen-agent` itself only hard-depends on `mcp`. On Windows it needs **nothing else**:
+capture is GDI plus a PNG encoder built on `zlib`, and input is `user32.SendInput`
+through `ctypes`.
 
 Check what works on *your* machine:
 
@@ -59,17 +61,20 @@ screen-agent doctor
 ```
 
 ```
-screen-agent 0.1.0 on linux
-  [OK  ] mutter           usable here
-  [OK  ] wayland-tools    usable here
-  [OK  ] x11              usable here
-  [no  ] macos            not macOS
-  [no  ] windows          not Windows
+screen-agent 0.2.0 on win32
+  [no  ] mutter          DBUS_SESSION_BUS_ADDRESS is not set (no session bus)
+  [no  ] wayland-tools   WAYLAND_DISPLAY is not set
+  [no  ] x11             DISPLAY is not set
+  [no  ] macos           not macOS
+  [OK  ] windows         usable here
 
-selected backend: mutter (GNOME / Mutter (D-Bus))
-backend        : mutter (wayland+x11 on linux)
+selected backend: windows (Windows (GDI capture + user32 SendInput))
+backend        : windows (windows on win32)
 desktop        : 1920x1080 at (0, 0)
-capabilities    : absolute_pointer=no, keyboard=yes, mouse=yes, record=yes, screenshot=yes
+capabilities    : absolute_pointer=yes, keyboard=yes, mouse=yes, record=yes, screenshot=yes
+tools          : Pillow=yes, ffmpeg=C:\Program Files\ffmpeg\bin\ffmpeg.exe
+note           : DPI awareness: per-monitor-v2 (coordinates are physical pixels)
+note           : screen_record uses ffmpeg to write a video file
 ```
 
 `doctor` tells you exactly which tool is missing and what to install, per backend.
@@ -118,18 +123,21 @@ to install it: `{"command": "uvx", "args": ["screen-agent", "serve"]}`.
 | --- | --- | --- |
 | `screen_info` | — | desktop size, active backend, per-capability support |
 | `screenshot` | `path`, `region`, `cursor`, `scale` | PNG of the screen or a `x,y,w,h` region; returns the path |
-| `screen_record` | `seconds`, `path` | records the screen to `.webm` |
+| `screen_record` | `seconds`, `path` | records the screen to `.webm`/`.mp4` (or `.apng` without ffmpeg) |
 | `mouse_move` | `x`, `y`, `cursor` | absolute pointer move, optional shape |
 | `mouse_move_by` | `dx`, `dy` | relative pointer move |
 | `mouse_click` | `x`, `y`, `button`, `clicks` | click, optionally moving first; `clicks=2` double |
 | `mouse_drag` | `x1,y1,x2,y2`, `button`, `steps` | press, drag, release |
-| `mouse_scroll` | `amount`, `direction`, `horizontal` | wheel notches |
+| `mouse_scroll` | `amount`, `direction`, `horizontal` | wheel notches; `up`/`down` mean the same on every backend |
 | `type_text` | `text`, `interval_ms` | types literal text into the focused window |
-| `key_press` | `keys` | `Return`, `Tab`, `ctrl+c`, `ctrl+shift+t`, `alt+F4`, … |
+| `key_press` | `keys` | `Return`, `Tab`, `ctrl+c`, `ctrl+shift+t`, `alt+F4`, `+`, `space`, … |
 
 Coordinates are absolute pixels with `(0,0)` at the top-left of the whole desktop, as
 reported by `screen_info`. Multi-monitor layouts with a negative origin work; the region
-parser clamps to the desktop rectangle.
+parser clamps to the desktop rectangle. `key_press` takes `+` and `space` as keys in
+their own right (`"ctrl++"` is Ctrl and the plus sign), and every named key
+`keys.py` knows about resolves on every backend - `tests/test_windows.py` and
+`test_mutter_keysym_tables_cover_every_parsed_key` assert exactly that.
 
 ### The loop an agent should run
 
@@ -170,7 +178,7 @@ screen-agent doctor --json
 | `wayland-tools` | any Wayland (Sway, Hyprland, river) | `grim` / `wlshot` / `wayshot` / `hyprshot` | `ydotool` / `dotool` / `wtype` / `xdotool` | those tools |
 | `x11` | X11 sessions | `mss` → `import` → `ffmpeg` → `scrot`/`maim` | `xdotool` | `xdotool` + one capture tool |
 | `macos` | macOS | `screencapture` → Pillow | CoreGraphics events | Screen Recording + Accessibility permission |
-| `windows` | Windows 10/11 | Pillow `ImageGrab` | `user32` `SendInput` | Pillow |
+| `windows` | Windows 10/11 | GDI `BitBlt` → PNG written with `zlib` | `user32.SendInput` | nothing (ffmpeg only for video) |
 
 Auto-detection walks that list in order and picks the first that fits. Force one with
 `--backend NAME` or `SCREEN_AGENT_BACKEND=NAME`.
@@ -197,6 +205,39 @@ sudo modprobe uinput && ydotoold &
 ```
 
 The `mutter` backend needs neither of those.
+
+### Windows
+
+Nothing to install: `screen-agent` is enough.
+
+* **DPI awareness is not optional.** A process that is not DPI aware sees the 1536x864
+  *logical* image of a 1920x1080 display at 125% scaling, while `SendInput` and the GDI
+  screen DC are addressed in *physical* pixels, so every click lands ~20% off. The
+  backend switches the process to per-monitor-v2 before touching the screen and
+  `doctor` / `screen_info` report what it got.
+* **The desktop is the virtual screen.** `SM_CXSCREEN` only covers the primary monitor;
+  a second monitor to the left of it gives the desktop a negative origin, which is the
+  coordinate space `GetCursorPos`, `SetCursorPos` and GDI all use.
+* **Absolute pointer motion only.** Injected `MOUSEEVENTF_MOVE` deltas go through the
+  pointer acceleration curve: an 18 pixel step arrives as 74, and a drag lands nowhere
+  near where it was aimed. `mouse_move_by` and `mouse_drag` therefore convert to
+  absolute coordinates (`MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK`), which are
+  pixel-exact.
+* **Every gesture is one `SendInput` call.** Windows serialises the calls, not the
+  events, so a button-down in one call and its up in another can be split by real
+  hardware input - and a drag silently becomes a click.
+* **`alt+F4` is a real `F4`.** Characters are resolved through `VkKeyScanW`, so
+  `alt+F4` is `Alt`+`VK_F4` rather than a dead Alt with a Unicode `F`. Named punctuation
+  (`lbracket`, `minus`, `plus`, …) is sent as the literal character instead, because the
+  physical bracket key is a dead key on a Vietnamese layout and an accented letter on a
+  French one.
+* **Recording needs ffmpeg for a real video.** GDI frames are piped into ffmpeg's
+  `rawvideo` demuxer, which gives a normal `.webm`/`.mp4`. Without ffmpeg the frames go
+  into an APNG - the one animated image format that needs no encoder and plays in every
+  browser - so `screen_record` always returns something watchable.
+* **Two things are out of reach**, as on every automation tool for Windows: the UAC
+  secure desktop, and windows elevated above the agent's own process (UIPI). Run the MCP
+  client as the same user and at the same integrity level as the apps you drive.
 
 ### Permissions on macOS
 
@@ -258,6 +299,12 @@ tools are `async def`, so a long capture never stalls other clients.
 `read` the file and pick the tokens it needs. Files land in `~/.cache/screen-agent`
 (or `%LOCALAPPDATA%\screen-agent` on Windows); override with `SCREEN_AGENT_DIR`.
 
+**PNG encoding without a dependency.** `screen_agent.imaging` writes PNG and APNG files
+with `zlib` and the standard library, decodes them back (all five scanline filters), and
+downscales with an `itemgetter` gather that is fast enough for a 4K screenshot. That is
+what lets the Windows backend take a screenshot on a bare `pip install`, and it keeps
+`screenshot(scale=...)` working when Pillow is absent.
+
 ---
 
 ## Development
@@ -266,14 +313,25 @@ tools are `async def`, so a long capture never stalls other clients.
 git clone <this repo> && cd screen-agent
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[all,dev]"
-pytest                 # unit tests: region parsing, key parsing, backend detection
+pytest                 # unit tests: regions, keys, images, backend detection, Win32 events
 ruff check .
 ```
 
-The test suite is pure-python and needs no display. End-to-end verification is manual:
+The unit tests need no display and do not touch the desktop. On Windows there is a second
+layer, which *does* drive the real session - it moves the mouse, types into a throwaway
+Win32 window and reads back what that window received:
+
+```bash
+python -m pytest tests/test_windows_e2e.py -q            # capture + record only
+set SCREEN_AGENT_E2E=1 && python -m pytest tests/ -q      # plus live input injection
+```
+
+Screenshots and recording run by default on Windows; the input tests are opt-in because
+they steal focus. Without `SCREEN_AGENT_E2E` you can still check the CLI by hand:
 
 ```bash
 screen-agent shot /tmp/check.png && python -c "from PIL import Image; print(Image.open('/tmp/check.png').size)"
+screen-agent record 3 /tmp/check.webm
 ```
 
 ---
@@ -283,10 +341,10 @@ screen-agent shot /tmp/check.png && python -c "from PIL import Image; print(Imag
 | Backend | State |
 | --- | --- |
 | `mutter` (GNOME/Wayland) | verified end-to-end on Ubuntu 24.04 + GNOME 46: screenshots, typing, mouse move, CapsLock round-trip |
+| `windows` | verified end-to-end on Windows 11 at 125% scaling: GDI screenshots, ffmpeg + APNG recording, and typing / click / double-click / drag-select / wheel against a live Win32 window |
 | `x11` | implemented, capture chain exercised in parts; needs a real X11 session to confirm |
 | `wayland-tools` | implemented against documented `grim`/`ydotool` flags |
 | `macos` | implemented against CoreGraphics; **untested — no macOS hardware here** |
-| `windows` | implemented against `user32.SendInput`; **untested — no Windows host here** |
 
 Issues on a platform I could not test are welcome; the backend interface is small, so a
 fix is usually a few lines in one file.

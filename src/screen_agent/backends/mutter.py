@@ -32,7 +32,7 @@ import re
 import shutil
 from pathlib import Path
 
-from ..core import Rect, ScreenAgentError, UnsupportedOperation, run_capture
+from ..core import Rect, ScreenAgentError, UnsupportedOperation, run_capture, scroll_delta
 from .base import Backend, BackendInfo, Cursor
 
 __all__ = ["MutterBackend"]
@@ -162,8 +162,8 @@ class MutterBackend(Backend):
 
     async def _connect(self):
         if self._bus is None:
-            from dbus_next.aio import MessageBus  # noqa: PLC0415
             from dbus_next import BusType  # noqa: PLC0415
+            from dbus_next.aio import MessageBus  # noqa: PLC0415
 
             self._bus = await MessageBus(bus_type=BusType.SESSION).connect()
         return self._bus
@@ -329,17 +329,12 @@ class MutterBackend(Backend):
     async def scroll(self, amount: int = 3, direction: str = "down", horizontal: bool = False) -> None:
         rd = await self._ensure_rd()
         axis = 1 if horizontal else 0
-        d = direction.strip().lower()
-        n = abs(int(amount))
-        if d in ("down", "right", "bottom"):
-            n = -n
-        elif d not in ("up", "left", "top"):
-            raise ScreenAgentError("direction must be up/down (left/right when horizontal=True)")
+        remaining = scroll_delta(int(amount), direction, horizontal) * 120
         # Mutter follows the X11 convention of 120 units per wheel notch
-        remaining, notch = n * 120, 120
-        while abs(remaining) >= notch:
-            await rd.call_notify_pointer_axis_discrete(axis, notch if remaining > 0 else -notch)
-            remaining -= notch if remaining > 0 else -notch
+        while abs(remaining) >= 120:
+            step = 120 if remaining > 0 else -120
+            await rd.call_notify_pointer_axis_discrete(axis, step)
+            remaining -= step
             await asyncio.sleep(0.02)
         if remaining:
             await rd.call_notify_pointer_axis_discrete(axis, remaining)

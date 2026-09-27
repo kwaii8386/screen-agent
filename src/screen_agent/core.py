@@ -6,9 +6,9 @@ import asyncio
 import os
 import shutil
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
 __all__ = [
     "Rect",
@@ -17,11 +17,11 @@ __all__ = [
     "BackendUnavailable",
     "parse_region",
     "parse_region_arg",
-    "have",
     "missing",
     "run",
     "run_capture",
     "scale_image",
+    "scroll_delta",
     "default_shot_dir",
 ]
 
@@ -81,13 +81,27 @@ def parse_region(text: str | None, desktop: Rect) -> Rect:
 parse_region_arg = parse_region
 
 
-def have(*tools: str) -> list[str]:
-    """Return the subset of *tools* that are not on PATH."""
-    return [t for t in tools if shutil.which(t) is None]
-
-
 def missing(*tools: str) -> list[str]:
-    return [t for t in tools if shutil.which(t) is None and t]
+    """Return the subset of *tools* that is not on PATH."""
+    return [t for t in tools if t and shutil.which(t) is None]
+
+
+def scroll_delta(notches: int, direction: str, horizontal: bool = False) -> int:
+    """Signed wheel delta shared by every backend, so ``down`` means the same thing.
+
+    Windows, X11, Mutter and macOS all follow one convention: a positive delta scrolls
+    up (or right when *horizontal*). Backends that speak button numbers translate this
+    sign into their own axis; backends that take a signed delta pass it through.
+    """
+    text = direction.strip().lower()
+    if text in ("up", "left", "top"):
+        return abs(int(notches))
+    if text in ("down", "right", "bottom"):
+        return -abs(int(notches))
+    raise ScreenAgentError(
+        "direction must be up/down (left/right when horizontal=True), "
+        f"not {direction!r}"
+    )
 
 
 async def run(
@@ -139,11 +153,14 @@ async def run_capture(argv: Sequence[str], deadline: float, poll: float = 0.05) 
 
     Used for screen recorders, which keep running until they are interrupted.
     """
-    proc = await asyncio.create_subprocess_exec(
-        *[str(a) for a in argv],
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *[str(a) for a in argv],
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except (OSError, ValueError) as exc:
+        raise ScreenAgentError(f"{argv[0]}: cannot start ({exc})") from exc
     try:
         await asyncio.sleep(deadline)
     finally:
@@ -154,24 +171,44 @@ async def run_capture(argv: Sequence[str], deadline: float, poll: float = 0.05) 
         except asyncio.TimeoutError:
             with contextlib_suppress():
                 proc.kill()
+            with contextlib_suppress():
+                await proc.wait()
 
 
 def scale_image(path: Path, max_width: int) -> tuple[int, int]:
-    """Downscale a PNG in place. Returns the (possibly unchanged) size."""
-    if max_width <= 0:
-        return _png_size(path)
+    """Downscale a PNG in place. Returns the (possibly unchanged) size.
+
+    Pillow does the work when it is installed. Without it the file is decoded, resized
+    and re-encoded with :mod:`screen_agent.imaging`, so ``screenshot(scale=...)`` still
+    does something useful on a bare install.
+    """
+    width, height = _png_size(path)
+    if max_width <= 0 or width <= max_width:
+        return width, height
     try:
         from PIL import Image  # noqa: PLC0415
     except ImportError:
-        return _png_size(path)
-    with Image.open(path) as im:
-        if im.width <= max_width:
-            return im.size
-        ratio = max_width / im.width
-        size = (int(max_width), max(1, round(im.height * ratio)))
-        im = im.convert("RGB").resize(size)
-        im.save(path)
-        return im.size
+        pass
+    else:
+        with Image.open(path) as im:
+            if im.width <= max_width:
+                return im.size
+            ratio = max_width / im.width
+            size = (int(max_width), max(1, round(im.height * ratio)))
+            im.convert("RGB").resize(size).save(path)
+            return size
+    from .imaging import decode_png, downscale_rgb, encode_png  # noqa: PLC0415
+
+    data = path.read_bytes()
+    try:
+        src_w, src_h, rgb = decode_png(data)
+    except (ValueError, OSError) as exc:
+        raise ScreenAgentError(
+            f"cannot scale {path}: {exc} (install Pillow to scale arbitrary PNGs)"
+        ) from exc
+    small, new_w, new_h = downscale_rgb(rgb, src_w, src_h, max_width)
+    path.write_bytes(encode_png(new_w, new_h, small))
+    return new_w, new_h
 
 
 def _png_size(path: Path) -> tuple[int, int]:

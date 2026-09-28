@@ -1,0 +1,846 @@
+{
+  "schema": 1,
+  "tool": "bench/bench_latency.py",
+  "generated_utc": "2026-09-28T11:49:48Z",
+  "machine": {
+    "cpu": "11th Gen Intel(R) Core(TM) i7-1165G7 @ 2.80GHz",
+    "processor": "Intel64 Family 6 Model 140 Stepping 1, GenuineIntel",
+    "cores_physical": 4,
+    "cpus_logical": 8,
+    "cpus_available": 8,
+    "platform": "Windows-10-10.0.26200-SP0",
+    "os": "Windows 10",
+    "os_build": "10.0.26200",
+    "python": "3.11.9",
+    "python_implementation": "CPython",
+    "pillow": "12.1.1",
+    "backend": "windows",
+    "backend_display": "Windows (GDI capture + user32 SendInput)",
+    "desktop": [
+      0,
+      0,
+      1920,
+      1080
+    ],
+    "dpi_awareness": "per-monitor-v2"
+  },
+  "method": {
+    "iterations": 20,
+    "warmup": 2,
+    "timer": "time.perf_counter",
+    "percentile": "nearest-rank",
+    "percentiles_reported": [
+      "median",
+      "p95",
+      "min",
+      "max"
+    ],
+    "decompositions": "end-to-end rows and their component rows are timed in the same process on the same frames",
+    "input_injection": "none; the benchmark is read-only against the desktop"
+  },
+  "measurements": {
+    "capture_full_gdi_grab": {
+      "label": "full 1920x1080: GDI grab (DC, BitBlt, GetDIBits, bytes copy)",
+      "group": "1-full-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "",
+      "median": 33.2285,
+      "mean": 33.3444,
+      "p95": 35.4072,
+      "min": 30.7266,
+      "max": 35.583,
+      "stdev": 1.3397
+    },
+    "capture_full_bgra_to_rgb": {
+      "label": "full: BGRA -> RGB channel swap",
+      "group": "1-full-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "",
+      "median": 9.3006,
+      "mean": 9.3191,
+      "p95": 9.6596,
+      "min": 8.8376,
+      "max": 10.4474,
+      "stdev": 0.3687,
+      "extra": {
+        "buffer_bytes": 8294400
+      }
+    },
+    "capture_full_png_encode": {
+      "label": "full: PNG encode (scanline loop + zlib level 6)",
+      "group": "1-full-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "",
+      "median": 53.2697,
+      "mean": 53.2282,
+      "p95": 54.2271,
+      "min": 51.5318,
+      "max": 54.3079,
+      "stdev": 0.7469,
+      "extra": {
+        "png_bytes": 212453
+      }
+    },
+    "capture_full_png_zlib": {
+      "label": "full: _idat only (inside the encode above)",
+      "group": "1-full-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "",
+      "median": 53.2899,
+      "mean": 53.1555,
+      "p95": 53.8646,
+      "min": 51.3276,
+      "max": 54.0103,
+      "stdev": 0.6857,
+      "extra": {
+        "idat_bytes": 212396,
+        "zlib_level": 6
+      }
+    },
+    "capture_full_file_write": {
+      "label": "full: write the PNG to disk",
+      "group": "1-full-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "",
+      "median": 0.2524,
+      "mean": 0.3101,
+      "p95": 0.6285,
+      "min": 0.2231,
+      "max": 0.7819,
+      "stdev": 0.1442,
+      "extra": {
+        "png_bytes": 212453
+      }
+    },
+    "capture_full_end_to_end": {
+      "label": "full 1920x1080: capture_png end to end",
+      "group": "1-full-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "",
+      "median": 83.2752,
+      "mean": 84.2242,
+      "p95": 85.5148,
+      "min": 82.4162,
+      "max": 98.7198,
+      "stdev": 3.5019,
+      "extra": {
+        "image": [
+          1920,
+          1080
+        ],
+        "bytes_on_disk": 212331
+      }
+    },
+    "capture_region_gdi_grab": {
+      "label": "region 480x270: GDI grab",
+      "group": "2-region-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "",
+      "median": 16.4941,
+      "mean": 16.7445,
+      "p95": 18.0178,
+      "min": 15.57,
+      "max": 19.2952,
+      "stdev": 0.95
+    },
+    "capture_region_bgra_to_rgb": {
+      "label": "region: BGRA -> RGB",
+      "group": "2-region-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "",
+      "median": 0.3593,
+      "mean": 0.3524,
+      "p95": 0.4888,
+      "min": 0.2766,
+      "max": 0.5887,
+      "stdev": 0.0828,
+      "extra": {
+        "buffer_bytes": 518400
+      }
+    },
+    "capture_region_png_encode": {
+      "label": "region: PNG encode",
+      "group": "2-region-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "",
+      "median": 3.6868,
+      "mean": 3.7359,
+      "p95": 3.9168,
+      "min": 3.6077,
+      "max": 4.1123,
+      "stdev": 0.1249,
+      "extra": {
+        "png_bytes": 17816
+      }
+    },
+    "capture_region_file_write": {
+      "label": "region: write the PNG to disk",
+      "group": "2-region-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "",
+      "median": 0.2268,
+      "mean": 0.233,
+      "p95": 0.2985,
+      "min": 0.1807,
+      "max": 0.3078,
+      "stdev": 0.04,
+      "extra": {
+        "png_bytes": 17816
+      }
+    },
+    "capture_region_end_to_end": {
+      "label": "region 480x270: capture_png end to end",
+      "group": "2-region-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "",
+      "median": 16.7092,
+      "mean": 16.6352,
+      "p95": 17.5059,
+      "min": 15.2997,
+      "max": 17.516,
+      "stdev": 0.5426,
+      "extra": {
+        "image": [
+          480,
+          270
+        ]
+      }
+    },
+    "capture_tiny_gdi_grab": {
+      "label": "16x16 region: GDI grab (the fixed-cost floor)",
+      "group": "2-region-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "the floor: 100x fewer pixels than the full screen, same grab",
+      "median": 16.7083,
+      "mean": 16.7419,
+      "p95": 17.1477,
+      "min": 16.1413,
+      "max": 17.7232,
+      "stdev": 0.3548,
+      "extra": {
+        "region": [
+          16,
+          16
+        ]
+      }
+    },
+    "capture_scaled_gdi_640": {
+      "label": "full screen -> 640 wide, GDI StretchBlt (capture_scaled)",
+      "group": "3-scaled-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "GDI StretchBlt into a 640 bitmap",
+      "median": 33.0383,
+      "mean": 33.2866,
+      "p95": 34.8002,
+      "min": 31.6009,
+      "max": 35.1069,
+      "stdev": 0.8274,
+      "extra": {
+        "image": [
+          640,
+          360
+        ]
+      }
+    },
+    "capture_png_then_scale_640": {
+      "label": "full screen -> 640 wide, capture_png then core.scale_image",
+      "group": "3-scaled-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "capture full size, then rescale the finished file",
+      "median": 116.6392,
+      "mean": 116.7473,
+      "p95": 119.2735,
+      "min": 112.8982,
+      "max": 120.5092,
+      "stdev": 1.5499,
+      "extra": {
+        "image": [
+          640,
+          360
+        ],
+        "scale_image_branch": "Pillow 12.1.1"
+      }
+    },
+    "scale_image_640_only": {
+      "label": "core.scale_image alone, Pillow available",
+      "group": "3-scaled-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "scale_image() on an already-captured file; the file copy is not timed",
+      "median": 31.5162,
+      "mean": 32.1909,
+      "p95": 35.1946,
+      "min": 29.9028,
+      "max": 37.2897,
+      "stdev": 2.0148,
+      "extra": {
+        "image": [
+          640,
+          360
+        ],
+        "pillow_available": true,
+        "input_filters": {
+          "0": 1080
+        },
+        "input_png_bytes": 212453
+      }
+    },
+    "scale_image_640_no_pillow_own_png": {
+      "label": "core.scale_image alone, Pillow hidden, filter-0 input",
+      "group": "3-scaled-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "scale_image() on an already-captured file; the file copy is not timed",
+      "median": 33.8513,
+      "mean": 34.4624,
+      "p95": 37.2162,
+      "min": 32.0938,
+      "max": 37.853,
+      "stdev": 1.623,
+      "extra": {
+        "image": [
+          640,
+          360
+        ],
+        "pillow_available": false,
+        "input_filters": {
+          "0": 1080
+        },
+        "input_png_bytes": 212453
+      }
+    },
+    "scale_image_640_no_pillow_pillow_png": {
+      "label": "core.scale_image alone, Pillow hidden, Pillow-written input",
+      "group": "3-scaled-capture",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "scale_image() on an already-captured file; the file copy is not timed",
+      "median": 825.9313,
+      "mean": 827.8582,
+      "p95": 841.2297,
+      "min": 800.6158,
+      "max": 873.1408,
+      "stdev": 14.7372,
+      "extra": {
+        "image": [
+          640,
+          360
+        ],
+        "pillow_available": false,
+        "input_filters": {
+          "1": 93,
+          "2": 698,
+          "4": 289
+        },
+        "input_png_bytes": 202193
+      }
+    },
+    "downscale_rgb_1920_to_640": {
+      "label": "downscale_rgb 1920x1080 -> 640 (nearest, itemgetter)",
+      "group": "4-downscale",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "",
+      "median": 6.7411,
+      "mean": 6.7796,
+      "p95": 7.1844,
+      "min": 6.3641,
+      "max": 7.4461,
+      "stdev": 0.3029,
+      "extra": {
+        "out_image": [
+          640,
+          360
+        ]
+      }
+    },
+    "downscale_rgb_1920_to_640_bytes_read": {
+      "label": "downscale_rgb: source bytes read by the row loop",
+      "group": "4-downscale",
+      "unit": "bytes",
+      "n": 5,
+      "status": "ok",
+      "note": "same value every run; n is the number of confirmations (n=5)",
+      "median": 2073600.0,
+      "mean": 2073600.0,
+      "p95": 2073600.0,
+      "min": 2073600.0,
+      "max": 2073600.0,
+      "stdev": 0.0,
+      "extra": {
+        "reads": 360,
+        "bytes_read": 2073600,
+        "widest_read": 5760,
+        "one_row_every_output_row": 2073600,
+        "source_bytes": 6220800
+      }
+    },
+    "downscale_rgb_tail_slice_reference_bytes_read": {
+      "label": "the pre-fix row read, for comparison",
+      "group": "4-downscale",
+      "unit": "bytes",
+      "n": 2,
+      "status": "ok",
+      "note": "pre-fix expression, reconstructed; not the code in src/",
+      "median": 1122854400.0,
+      "mean": 1122854400.0,
+      "p95": 1122854400.0,
+      "min": 1122854400.0,
+      "max": 1122854400.0,
+      "stdev": 0.0,
+      "extra": {
+        "reads": 720,
+        "bytes_read": 1122854400,
+        "source_bytes": 6220800,
+        "one_row_every_output_row": 2073600
+      }
+    },
+    "asyncio_sleep_1ms_quantum": {
+      "label": "asyncio.sleep(0.001) x10, per call",
+      "group": "5-type-pacing",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "per call, averaged over 10 sleeps",
+      "median": 15.667,
+      "mean": 15.6814,
+      "p95": 15.8665,
+      "min": 15.4764,
+      "max": 15.9319,
+      "stdev": 0.1218,
+      "extra": {
+        "requested_sleep_ms": 1.0,
+        "sleeps_per_repeat": 10
+      }
+    },
+    "asyncio_sleep_8ms_quantum": {
+      "label": "asyncio.sleep(0.008) x10, per call (the old interval)",
+      "group": "5-type-pacing",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "per call, averaged over 10 sleeps",
+      "median": 15.5514,
+      "mean": 15.5821,
+      "p95": 15.8924,
+      "min": 15.3495,
+      "max": 15.9608,
+      "stdev": 0.1697,
+      "extra": {
+        "requested_sleep_ms": 8.0,
+        "sleeps_per_repeat": 10
+      }
+    },
+    "asyncio_sleep_ladder": {
+      "label": "sleep ladder: requested vs observed, one sample per rung",
+      "group": "5-type-pacing",
+      "unit": "ms",
+      "n": 10,
+      "status": "ok",
+      "note": "per-call cost at each ladder rung, one sample per rung; the request/observed pairs and the derived quantum are in facts.timer_quantum (n=10)",
+      "median": 15.69,
+      "mean": 19.92,
+      "p95": 45.5215,
+      "min": 0.0044,
+      "max": 45.5215,
+      "stdev": 12.2205,
+      "extra": {
+        "yield_only_cost_ms": 0.0044,
+        "timer_quantum_ms": 15.5658,
+        "finest_sleep_honoured_ms": 15.0,
+        "smallest_non_free_sleep_ms": 0.1,
+        "loop_class": "ProactorEventLoop",
+        "loop_clock_resolution_s": 0.015625
+      }
+    },
+    "typing_pace_40_chars_interval_0_008": {
+      "label": "40-character pacing loop, interval=0.008",
+      "group": "5-type-pacing",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "loop + sleeps only; no input is injected",
+      "median": 623.3505,
+      "mean": 623.2115,
+      "p95": 625.6941,
+      "min": 619.6809,
+      "max": 626.1063,
+      "stdev": 1.786,
+      "extra": {
+        "characters": 40,
+        "interval_s": 0.008,
+        "excludes": "the per-character SendInput call"
+      }
+    },
+    "typing_pace_40_chars_interval_0": {
+      "label": "40-character pacing loop, interval=0 (loop cost only)",
+      "group": "5-type-pacing",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "loop + sleeps only; no input is injected",
+      "median": 0.0028,
+      "mean": 0.0031,
+      "p95": 0.0048,
+      "min": 0.0015,
+      "max": 0.0072,
+      "stdev": 0.0013,
+      "extra": {
+        "characters": 40,
+        "interval_s": 0.0,
+        "excludes": "the per-character SendInput call"
+      }
+    },
+    "screen_state": {
+      "label": "backend.screen_state()",
+      "group": "6-state-vs-screenshot",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "facts only, no pixels",
+      "median": 0.2284,
+      "mean": 0.2309,
+      "p95": 0.2477,
+      "min": 0.2184,
+      "max": 0.2517,
+      "stdev": 0.0093,
+      "extra": {
+        "windows_reported": 4,
+        "payload_bytes": 788
+      }
+    },
+    "screen_state_windows_only": {
+      "label": "the EnumWindows pass inside screen_state",
+      "group": "6-state-vs-screenshot",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "the EnumWindows pass on its own, in a tight loop",
+      "median": 0.2295,
+      "mean": 0.2344,
+      "p95": 0.2673,
+      "min": 0.2204,
+      "max": 0.2766,
+      "stdev": 0.0157
+    },
+    "screen_state_one_window_facts": {
+      "label": "one window: title, class, rect",
+      "group": "6-state-vs-screenshot",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "one window: GetWindowText + GetClassName + GetWindowRect",
+      "median": 0.0046,
+      "mean": 0.0053,
+      "p95": 0.0062,
+      "min": 0.0044,
+      "max": 0.0147,
+      "stdev": 0.0023
+    },
+    "screenshot_cheapest_16x16": {
+      "label": "cheapest possible screenshot: 16x16 capture_png end to end",
+      "group": "6-state-vs-screenshot",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "smallest capture the backend will do, end to end",
+      "median": 16.5962,
+      "mean": 16.6043,
+      "p95": 17.6793,
+      "min": 14.8655,
+      "max": 17.9416,
+      "stdev": 0.7262,
+      "extra": {
+        "image": [
+          16,
+          16
+        ]
+      }
+    },
+    "png_decode_filter0": {
+      "label": "decode_png of a filter-0 PNG (what this package writes)",
+      "group": "7-png-decode",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "filter 0: what imaging.encode_png writes, and all decode_png has to read",
+      "median": 11.6179,
+      "mean": 11.6975,
+      "p95": 12.2028,
+      "min": 11.2631,
+      "max": 12.6809,
+      "stdev": 0.3908,
+      "extra": {
+        "unfilter_median_ms": 0.1692,
+        "unfilter_share_pct": 1.5,
+        "png_bytes": 212453
+      }
+    },
+    "png_decode_filter1": {
+      "label": "decode_png of a filter-1 PNG (Sub)",
+      "group": "7-png-decode",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "filter 1 (Sub): a pure-Python per-byte loop in _unfilter",
+      "median": 527.0798,
+      "mean": 527.7457,
+      "p95": 539.9126,
+      "min": 508.1661,
+      "max": 556.9482,
+      "stdev": 11.6195,
+      "extra": {
+        "unfilter_median_ms": 512.1897,
+        "unfilter_share_pct": 97.2,
+        "png_bytes": 196989
+      }
+    },
+    "png_decode_pillow_png": {
+      "label": "decode_png of a PNG Pillow wrote from the same frame",
+      "group": "7-png-decode",
+      "unit": "ms",
+      "n": 20,
+      "status": "ok",
+      "note": "a PNG Pillow wrote from the same frame: whatever filters it picked",
+      "median": 807.6786,
+      "mean": 806.8212,
+      "p95": 823.033,
+      "min": 787.7087,
+      "max": 826.7504,
+      "stdev": 12.0003,
+      "extra": {
+        "unfilter_median_ms": 794.4645,
+        "unfilter_share_pct": 98.4,
+        "png_bytes": 202193
+      }
+    }
+  },
+  "facts": {
+    "decomposition_full": {
+      "label": "1920x1080",
+      "parts_ms": [
+        33.228,
+        9.301,
+        53.27,
+        0.252
+      ],
+      "sum_of_parts_ms": 96.051,
+      "end_to_end_ms": 83.275,
+      "sum_over_end_to_end": 1.153,
+      "caveat": "each part is timed in isolation with the previous output still referenced, the total inside one call; treat the shares as indicative of where the time goes, not as an exact split"
+    },
+    "decomposition_region": {
+      "label": "480x270",
+      "parts_ms": [
+        16.494,
+        0.359,
+        3.687,
+        0.227
+      ],
+      "sum_of_parts_ms": 20.767,
+      "end_to_end_ms": 16.709,
+      "sum_over_end_to_end": 1.243,
+      "caveat": "each part is timed in isolation with the previous output still referenced, the total inside one call; treat the shares as indicative of where the time goes, not as an exact split"
+    },
+    "scaled_path_speedup": {
+      "gdi_ms": 33.038,
+      "old_path_ms": 116.639,
+      "old_over_gdi": 3.53
+    },
+    "scaled_path_same_size": true,
+    "scaled_image_size": [
+      640,
+      360
+    ],
+    "bitblt_fixed_stall": {
+      "full_px": 2073600,
+      "tiny_px": 256,
+      "tiny_ms": 16.708,
+      "full_ms": 33.228,
+      "marginal_ms_for_2M_px": 16.52,
+      "stall_share_of_full_pct": 50.3,
+      "region_ms": 16.494,
+      "region_px": 129600,
+      "region_over_tiny": 0.99
+    },
+    "state_vs_screenshot": {
+      "screen_state_ms": 0.2284,
+      "cheapest_screenshot_ms": 16.596,
+      "full_screenshot_ms": 83.275,
+      "cheapest_is_x_state": 72.7,
+      "full_is_x_state": 364.7,
+      "one_window_facts_ms": 0.0046,
+      "caveat": "the 'about a microsecond' figure in screen_state's docstring is the cost of one window lookup; the cost of screen_state is that lookup times the number of top-level windows, which is why the total is hundreds of microseconds. EnumWindows can also stall: a single sample has been seen an order of magnitude above the median, which is why p95 and max are reported."
+    },
+    "decode_filter_ratio": {
+      "filter0_ms": 11.618,
+      "filter1_ms": 527.08,
+      "filter1_over_filter0": 45.4
+    },
+    "typing_pacing": {
+      "paced_40_chars_ms": 623.35,
+      "unpaced_loop_ms": 0.00285,
+      "sleep_quantum_ms": 15.5514,
+      "quantum_x_paced": 40.1,
+      "not_measured": "the per-character SendInput cost, so the unpaced number here is a floor, not the 1.47 ms the docstring quotes"
+    },
+    "scale_image_branch": "Pillow 12.1.1",
+    "region": [
+      480,
+      270
+    ],
+    "tiny_region": [
+      16,
+      16
+    ],
+    "downscale_output": {
+      "new_w": 640,
+      "new_h": 360,
+      "source_bytes": 6220800,
+      "out_bytes": 691200
+    },
+    "downscale_reads": {
+      "reads": 360,
+      "bytes_read": 2073600,
+      "widest_read": 5760,
+      "one_row_every_output_row": 2073600,
+      "source_bytes": 6220800
+    },
+    "downscale_tail_slice_reference": {
+      "reads": 720,
+      "bytes_read": 1122854400,
+      "source_bytes": 6220800,
+      "one_row_every_output_row": 2073600
+    },
+    "timer_quantum": {
+      "rungs": [
+        {
+          "requested_ms": 0.0,
+          "observed_ms": 0.0044,
+          "min_ms": 0.0044,
+          "max_ms": 0.0044,
+          "repeats": 3,
+          "sleeps_per_repeat": 25
+        },
+        {
+          "requested_ms": 0.1,
+          "observed_ms": 15.5976,
+          "min_ms": 15.5725,
+          "max_ms": 15.7204,
+          "repeats": 3,
+          "sleeps_per_repeat": 25
+        },
+        {
+          "requested_ms": 1.0,
+          "observed_ms": 15.7348,
+          "min_ms": 15.3995,
+          "max_ms": 15.8341,
+          "repeats": 3,
+          "sleeps_per_repeat": 25
+        },
+        {
+          "requested_ms": 4.0,
+          "observed_ms": 15.5658,
+          "min_ms": 15.5234,
+          "max_ms": 15.7607,
+          "repeats": 3,
+          "sleeps_per_repeat": 25
+        },
+        {
+          "requested_ms": 8.0,
+          "observed_ms": 15.6453,
+          "min_ms": 15.6118,
+          "max_ms": 15.7013,
+          "repeats": 3,
+          "sleeps_per_repeat": 25
+        },
+        {
+          "requested_ms": 12.0,
+          "observed_ms": 15.6385,
+          "min_ms": 15.6022,
+          "max_ms": 15.6544,
+          "repeats": 3,
+          "sleeps_per_repeat": 25
+        },
+        {
+          "requested_ms": 15.0,
+          "observed_ms": 16.3084,
+          "min_ms": 16.2493,
+          "max_ms": 16.3819,
+          "repeats": 3,
+          "sleeps_per_repeat": 25
+        },
+        {
+          "requested_ms": 15.6,
+          "observed_ms": 29.8042,
+          "min_ms": 26.8945,
+          "max_ms": 29.8403,
+          "repeats": 3,
+          "sleeps_per_repeat": 25
+        },
+        {
+          "requested_ms": 16.0,
+          "observed_ms": 29.3796,
+          "min_ms": 28.7469,
+          "max_ms": 29.8521,
+          "repeats": 3,
+          "sleeps_per_repeat": 25
+        },
+        {
+          "requested_ms": 32.0,
+          "observed_ms": 45.5215,
+          "min_ms": 45.1078,
+          "max_ms": 45.7157,
+          "repeats": 3,
+          "sleeps_per_repeat": 25
+        }
+      ],
+      "yield_only_cost_ms": 0.0044,
+      "timer_quantum_ms": 15.5658,
+      "finest_sleep_honoured_ms": 15.0,
+      "smallest_non_free_sleep_ms": 0.1,
+      "loop_class": "ProactorEventLoop",
+      "loop_clock_resolution_s": 0.015625
+    },
+    "png_filter0_roundtrip_exact": true,
+    "png_filter1_roundtrip_exact": true,
+    "pillow_png_filters": {
+      "1": 93,
+      "2": 698,
+      "4": 289
+    },
+    "pillow_png_roundtrip_exact": true
+  }
+}

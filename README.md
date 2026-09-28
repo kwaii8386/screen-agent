@@ -28,8 +28,12 @@ So the tools here are ordered by how much they actually tell you per unit of cos
 | `screen_state()` | window titles, rectangles, foreground app, pointer — **no pixels** | **0.25 ms** |
 | `browser_elements(sel)` | exact link text, `href` and geometry | **~1 ms** |
 | `browser_click(sel, nth)` | the click, plus a verified before/after of the page | **~1 ms** |
-| `screenshot(region=…)` | pixels | 16 ms (region) / 95 ms (full screen) |
-| `screenshot()` + reading the image | pixels *and* tokens | 95 ms + 1–1.5k tokens |
+| `screenshot(region=…)` | pixels | 17 ms (480×270) / 83 ms (full screen) |
+| `screenshot()` + reading the image | pixels *and* tokens | 83 ms + 1–1.5k tokens |
+
+Every figure is from `bench/bench_latency.py` on one machine, and re-derivable:
+`python bench/bench_latency.py` prints the whole table and records the machine it ran
+on. Nothing here is a claim about your hardware.
 
 The same task, run against a local stand-in for a results page, with every click verified
 by URL: **0.88 seconds and zero screenshots**, against roughly 360 seconds and 12 images
@@ -382,12 +386,12 @@ Nothing to install: `screen-agent` is enough.
   before the change, so every coordinate read off it is wrong, and the mistake is
   invisible — the image looks fine. `screenshot(stable=True)` exists for this: it
   re-captures until two consecutive frames are identical.
-* **Capture cost is not where the time goes.** A full-screen capture is ~84 ms of which
-  54% is PNG encoding and 33% is `BitBlt`; the file write is 0.4%. `BitBlt` also has a
-  ~12.6 ms fixed stall regardless of area, so a 480×270 region costs nearly as much as the
-  whole screen — but a scaled capture is much cheaper, because GDI's `StretchBlt` shrinks
-  the pixels while copying them and the full-size frame is never encoded at all (47 ms
-  versus 146 ms for 1920×1080 → 640).
+* **Capture cost is not where the time goes.** A full-screen capture is ~83 ms, of which
+  64% is PNG encoding — and virtually all of *that* is `zlib`, not the row loop — and
+  40% is the GDI grab. Writing the file is 0.3%. `BitBlt` carries a ~16 ms fixed cost
+  whatever the area, so a 480×270 region is 17 ms against 33 ms for the whole screen:
+  **half**, not "about the same" as a first draft of this file claimed. Cropping pays,
+  but it is not free.
 
 ### Permissions on macOS
 
@@ -468,9 +472,29 @@ tools are `async def`, so a long capture never stalls other clients.
 
 **PNG encoding without a dependency.** `screen_agent.imaging` writes PNG and APNG files
 with `zlib` and the standard library, decodes them back (all five scanline filters), and
-downscales with an `itemgetter` gather that is fast enough for a 4K screenshot. That is
-what lets the Windows backend take a screenshot on a bare `pip install`, and it keeps
-`screenshot(scale=...)` working when Pillow is absent.
+downscales with an `itemgetter` gather. That is what lets the Windows backend take a
+screenshot on a bare `pip install`, and it keeps `screenshot(scale=...)` working when
+Pillow is absent.
+
+Two honest limits in that decoder, both measured rather than assumed:
+
+* **Writing a filter-0 PNG and reading one back is fast** — 12 ms for 1920×1080 — because
+  filter 0 is a memcpy. Filters 1–4 are reconstructed byte by byte in Python, and there
+  is no way around that without a C extension: 527 ms for a filter-1 image.
+* **Pillow's own output is the bad case.** Measured on a real screenshot of this desktop,
+  Pillow emits filter 2 for 65% of scanlines, filter 4 for 27% and filter 1 for 9% — so
+  *every* line goes through the slow path, and 527 ms is the optimistic estimate. Decoding
+  a Pillow-written 1920×1080 PNG this way takes 808 ms.
+
+That is not a reason to drop the fallback: `scale_image` decodes the file it just wrote,
+and `encode_png` writes filter 0, so `screenshot(scale=…)` without Pillow is ~34 ms and
+fine. It is a reason to keep `pillow` in the `image` extra rather than treat the
+pure-Python decoder as a fast path.
+
+**`screenshot(scale=…)` shrinks inside GDI.** `scale` is handed to the backend, which
+sizes its destination bitmap with `StretchBlt`/HALFTONE, so the full-size frame is never
+encoded and never decoded: **33 ms against 117 ms** for 1920×1080 → 640, a 3.5×
+difference, with the same output size.
 
 ---
 
@@ -483,6 +507,23 @@ pip install -e ".[all,dev]"
 pytest                 # unit tests: regions, keys, images, backend detection, Win32 events
 ruff check .
 ```
+
+**Latency claims live in `bench/`, not in the test suite.** A test that waits 30 ms to
+prove something is 3× faster is a test that fails on a busy machine and passes on broken
+code, so the suite asserts the *call path* — that `screenshot(scale=N)` reaches the GDI
+downscale rather than resizing afterwards — and every millisecond figure is measured here
+instead:
+
+```bash
+python bench/bench_latency.py          # ~3 min: 32 measurements, markdown table + latest.json
+python bench/bench_latency.py --quick  # 5 iterations, for a smoke check
+```
+
+`bench/latest.json` records the CPU, core count, Python and Pillow versions and the DPI
+mode alongside the numbers, because a latency figure without its machine is not a fact.
+`bench/README.md` has the method, the recorded baseline, and the noise evidence — a run
+contended with another process came out ~20% slower across the board, which is why every
+figure is reported as median and p95 with the sample size.
 
 The unit tests need no display and do not touch the desktop. On Windows there is a second
 layer, which *does* drive the real session - it moves the mouse, types into a throwaway

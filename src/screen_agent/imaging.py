@@ -275,10 +275,12 @@ def downscale_rgb(
     pick = itemgetter(*xs)
     for y in range(new_h):
         src_y = min(height - 1, int((y + 0.5) * height / new_h))
-        # the row base has to be bounded on BOTH sides. Slicing `src[base:]` and
-        # trimming afterwards copies the whole remaining tail of the buffer (up
-        # to 6 MB per row) and throws all but one row of it away - 1.9 GB of
-        # memcpy for a 1920x1080 -> 640 downscale.
+        # The row base has to be bounded on BOTH sides. Slicing `src[base:]` and
+        # trimming afterwards copies the whole remaining tail of the buffer and
+        # throws all but one row of it away. Measured by counting the bytes a
+        # recording `bytes` subclass is asked for: 1,122,854,400 B (1.12 GB) for a
+        # 1920x1080 -> 640 downscale, against 2,073,600 B for the fixed version -
+        # 542x the source image, to move 2 MB.
         base = src_y * src_stride
         row = src[base : base + src_stride]
         off = y * new_w * 3

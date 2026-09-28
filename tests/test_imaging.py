@@ -62,9 +62,11 @@ def test_downscale_row_slice_is_bounded():
     """A row read must cost one row, not the rest of the buffer.
 
     The bug this guards: ``src[base:][:stride]`` copies the entire remaining tail of
-    the source (up to 6.2 MB) on every output row and then throws all but one row
-    away. For 1920x1080 -> 640 that is 360 reads totalling ~1.9 GB instead of
-    360 * 5760 = 2.1 MB.
+    the source on every output row and then throws all but one row away. Counted with
+    the same recording trick, that is 1,122,854,400 B (1.12 GB) for 1920x1080 -> 640,
+    against 360 * 5760 = 2,073,600 B for the bounded form - 542x the source image, to
+    move 2 MB. (An earlier draft of this comment said 1.9 GB; the count is the number
+    above, and ``bench/bench_latency.py`` reproduces it.)
     """
     width, height, max_width = 1920, 1080, 640
     src = _RecordingBytes(_gradient(width, height))
@@ -80,7 +82,7 @@ def test_downscale_row_slice_is_bounded():
     assert max(stop for _, stop in src.reads) <= len(src)
     # and no read is longer than a single source row
     assert max(stop - start for start, stop in src.reads) <= stride
-    # the whole run costs about one row per output row, not ~1.9 GB
+    # the whole run costs about one row per output row, not the 1.12 GB the bug took
     assert src.copied <= new_h * stride
     assert src.copied < len(src), "the old bug copied the buffer 300+ times over"
 

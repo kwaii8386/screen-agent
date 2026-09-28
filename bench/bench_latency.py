@@ -509,7 +509,11 @@ def _scale_image_only(ctx: Ctx, *, no_pillow: bool, source: str) -> Result:
             else "scale_image_640_only")
     bench = _by_name[name]
     if source == "pillow":
-        blob = _pillow_png(ctx)
+        try:
+            blob = _pillow_png(ctx)
+        except ImportError as exc:
+            raise Unavailable(f"Pillow is not installed here, so there is no Pillow-written "
+                              f"PNG to scale ({exc})") from exc
     else:
         blob = ctx.full_png()
     pristine = ctx.scratch(f"pristine_{source}.png")
@@ -764,7 +768,12 @@ def _cheapest_screenshot(ctx: Ctx) -> Result:
 
 
 def _screen_state_parts(ctx: Ctx) -> Result:
-    """The part of ``screen_state`` that is the window enumeration, for context."""
+    """The part of ``screen_state`` that is the window enumeration, for context.
+
+    Timed on its own in a tight loop, so it is a different measurement context from
+    ``screen_state`` and the two should not be subtracted from each other: what it does
+    establish is which of the two the time is in.
+    """
     bench = _by_name["screen_state_windows_only"]
     u32 = ctx.backend._u32()  # noqa: SLF001 - measuring a private step, read-only
     samples, _ = _time_sync(
@@ -772,7 +781,24 @@ def _screen_state_parts(ctx: Ctx) -> Result:
         iterations=ctx.iterations,
         warmup=ctx.warmup,
     )
-    return _result(bench, samples, note="the EnumWindows pass on its own")
+    return _result(bench, samples, note="the EnumWindows pass on its own, in a tight loop")
+
+
+def _one_window_facts(ctx: Ctx) -> Result:
+    """The per-window cost inside that enumeration: title, class and rect.
+
+    This is the number the ``screen_state`` docstring calls "about a microsecond", and
+    measuring it separately is the only way to tell whether ``screen_state`` is slow
+    because a window lookup is slow or because there are hundreds of windows to look up.
+    """
+    bench = _by_name["screen_state_one_window_facts"]
+    u32 = ctx.backend._u32()  # noqa: SLF001
+    samples, _ = _time_sync(
+        lambda: ctx.backend._window_facts(u32, int(u32.GetForegroundWindow() or 0)),  # noqa: SLF001
+        iterations=ctx.iterations,
+        warmup=ctx.warmup,
+    )
+    return _result(bench, samples, note="one window: GetWindowText + GetClassName + GetWindowRect")
 
 
 # ==================================================================== 7. PNG decoding
@@ -1026,6 +1052,9 @@ BENCHES: tuple[Bench, ...] = (
           "backend.screen_state()", _screen_state),
     Bench("screen_state_windows_only", "6-state-vs-screenshot",
           "the EnumWindows pass inside screen_state", _screen_state_parts),
+    Bench("screen_state_one_window_facts", "6-state-vs-screenshot",
+          "one window: title, class, rect", _one_window_facts,
+          note="the per-window cost, for the 'about a microsecond' claim"),
     Bench("screenshot_cheapest_16x16", "6-state-vs-screenshot",
           "cheapest possible screenshot: 16x16 capture_png end to end", _cheapest_screenshot),
 
@@ -1066,67 +1095,83 @@ def _physical_cores() -> int | None:
     """Physical core count, which ``os.cpu_count()`` is not (it counts hardware threads).
 
     Asked for because a latency figure without its core count is not reproducible: a
-    4-core part with SMT off and a 4-core part with 8 threads do not heat the same.
-    Windows exposes the real topology through
-    ``GetLogicalProcessorInformationEx``; there is no ctypes-free way to ask.
+    4-core part with SMT disabled and a 4-core part with 8 hardware threads do not
+    heat, turbo or contend the same way.
+
+    Windows exposes the topology through ``GetLogicalProcessorInformationEx``, but the
+    size of one entry is a union whose largest member differs between Windows
+    versions, and on a virtual machine the reported topology can be synthetic
+    nonsense. So rather than trust a struct layout, this asks for the
+    ``RelationProcessorCore`` records and *validates* the answer: the candidate entry
+    sizes that divide the returned buffer exactly, that carry the requested
+    relationship in every entry, and whose processor masks are disjoint, non-zero and
+    together cover exactly the hardware threads Windows reported are all accepted -
+    and only if exactly one candidate survives is it believed. If none or several do,
+    this returns ``None`` and the JSON says so, because a plausible wrong core count
+    is worse than a missing one.
     """
     if sys.platform != "win32":
         try:
-            return len(
-                {
-                    line.split(":")[1].strip()
-                    for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines()
-                    if line.lower().startswith("core id")
-                }
-            ) or None
+            ids = {
+                line.split(":", 1)[1].strip()
+                for line in Path("/proc/cpuinfo").read_text(encoding="utf-8").splitlines()
+                if line.lower().startswith(("core id", "cpu cores"))
+            }
+            return len(ids) or None
         except OSError:
             return None
     try:
         import ctypes
         from ctypes import wintypes
 
-        class GroupAffinity(ctypes.Structure):
-            # KAFFINITY Mask, USHORT Group, USHORT reserved, 2 reserved words
-            _fields_ = [
-                ("Mask", ctypes.c_size_p),
-                ("Group", ctypes.c_ushort),
-                ("Reserved0", ctypes.c_ushort),
-                ("Reserved1", ctypes.c_size_p),
-                ("Reserved2", ctypes.c_size_p),
-            ]
-
-        class Union(ctypes.Union):
-            _fields_ = [("ProcessorCore", GroupAffinity)]
-
-        class Entry(ctypes.Structure):
-            _anonymous_ = ("payload",)
-            _fields_ = [
-                ("ProcessorInformation", ctypes.c_byte * 8),
-                ("Relationship", wintypes.DWORD),
-                ("payload", Union),
-            ]
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # noqa: S110
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         query = kernel32.GetLogicalProcessorInformationEx
-        query.argtypes = [wintypes.DWORD, ctypes.c_void_p,
-                          ctypes.POINTER(wintypes.DWORD)]
+        query.argtypes = [wintypes.DWORD, ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
         query.restype = wintypes.BOOL
+
+        relation_processor_core = 0
         size = wintypes.DWORD(0)
-        query(0, None, ctypes.byref(size))  # always fails: it is asking how big
+        query(relation_processor_core, None, ctypes.byref(size))  # asks how big
         if not size.value:
             return None
         buffer = ctypes.create_string_buffer(size.value)
-        if not query(0, buffer, ctypes.byref(size)):
+        if not query(relation_processor_core, buffer, ctypes.byref(size)):
             return None
-        stride = ctypes.sizeof(Entry)
-        total = 0
-        for offset in range(0, size.value - stride + 1, stride):
-            entry = Entry.from_buffer_copy(buffer.raw[offset : offset + stride])
-            if entry.Relationship == 0:  # RelationProcessorCore
-                total += entry.ProcessorCore.GroupCount
-        return total or None
+        raw = bytes(buffer.raw[: size.value])
     except (OSError, AttributeError, ValueError):  # pragma: no cover - Windows only
         return None
+
+    threads = os.cpu_count() or 0
+    accepted: list[tuple[int, int]] = []
+    for stride in (48, 56, 64, 72, 80):
+        if stride > len(raw) or len(raw) % stride:
+            continue
+        entries = len(raw) // stride
+        if not entries:
+            continue
+        relationships = [int.from_bytes(raw[i * stride : i * stride + 4], "little")
+                         for i in range(entries)]
+        if any(rel != relation_processor_core for rel in relationships):
+            continue
+        for offset in range(0, stride - 3, 4):
+            masks = [int.from_bytes(raw[i * stride + offset : i * stride + offset + 4], "little")
+                     for i in range(entries)]
+            if any(mask == 0 for mask in masks) or _overlaps(masks):
+                continue
+            if sum(bin(mask).count("1") for mask in masks) != threads:
+                continue
+            accepted.append((entries, offset))
+    return accepted[0][0] if len(accepted) == 1 else None
+
+
+def _overlaps(masks: list[int]) -> bool:
+    """True if any two bitmasks share a bit."""
+    seen = 0
+    for mask in masks:
+        if seen & mask:
+            return True
+        seen |= mask
+    return False
 
 
 def _machine(ctx: Ctx) -> dict[str, Any]:
@@ -1219,6 +1264,8 @@ def _derived_facts(results: dict[str, Result], ctx: Ctx) -> dict[str, Any]:
         }
     if ok("screen_state", "screenshot_cheapest_16x16", "capture_full_end_to_end"):
         state = med("screen_state")
+        per_window = med("screen_state_one_window_facts") if ok(
+            "screen_state_one_window_facts") else None
         out["state_vs_screenshot"] = {
             "screen_state_ms": round(state, 4),
             "cheapest_screenshot_ms": round(med("screenshot_cheapest_16x16"), 3),
@@ -1226,6 +1273,13 @@ def _derived_facts(results: dict[str, Result], ctx: Ctx) -> dict[str, Any]:
             "cheapest_is_x_state": round(med("screenshot_cheapest_16x16") / state, 1)
             if state else None,
             "full_is_x_state": round(med("capture_full_end_to_end") / state, 1) if state else None,
+            "one_window_facts_ms": round(per_window, 5) if per_window else None,
+            "caveat": "the 'about a microsecond' figure in screen_state's docstring is the "
+                      "cost of one window lookup; the cost of screen_state is that lookup "
+                      "times the number of top-level windows, which is why the total is "
+                      "hundreds of microseconds. EnumWindows can also stall: a single "
+                      "sample has been seen an order of magnitude above the median, which is "
+                      "why p95 and max are reported.",
         }
     if ok("png_decode_filter1", "png_decode_filter0"):
         slow, fast = med("png_decode_filter1"), med("png_decode_filter0")
@@ -1438,14 +1492,15 @@ def _fact_sections(facts: dict[str, Any], results: dict[str, Result]) -> list[tu
             "",
             f"* event loop : `{quantum['loop_class']}`, clock resolution "
             f"{quantum['loop_clock_resolution_s']:.1e} s",
-            f"* **quantum** : every sleep from {quantum['smallest_non_free_sleep_ms']:g} ms to "
-            f"{quantum['finest_sleep_honoured_ms']:g} ms costs "
-            f"{quantum['timer_quantum_ms']:.3f} ms",
-            f"* the smallest sleep that is not free is {quantum['smallest_non_free_sleep_ms']:g} ms"
-            f" - and it costs the full quantum. `asyncio.sleep(0)` is a yield and costs "
-            f"{quantum['yield_only_cost_ms']:.4f} ms.",
-            f"* the finest sleep the timer honours is {quantum['finest_sleep_honoured_ms']:g} ms; "
-            f"asking for more than that buys a second tick, not a shorter wait",
+            f"* **quantum** : {quantum['timer_quantum_ms']:.3f} ms - the cheapest that any "
+            f"non-zero sleep costs, and what every request from "
+            f"{quantum['smallest_non_free_sleep_ms']:g} ms to "
+            f"{quantum['finest_sleep_honoured_ms']:g} ms actually costs",
+            f"* `asyncio.sleep(0)` is a yield, not a sleep, and costs "
+            f"{quantum['yield_only_cost_ms']:.4f} ms",
+            f"* the finest sleep the timer honours is {quantum['finest_sleep_honoured_ms']:g} ms: "
+            f"ask for more and you buy a second tick, not a shorter wait. Any interval below "
+            f"that is indistinguishable from any other interval below that.",
         ]))
 
     down = facts.get("downscale_reads")
@@ -1453,25 +1508,50 @@ def _fact_sections(facts: dict[str, Any], results: dict[str, Result]) -> list[tu
     out = facts.get("downscale_output")
     if down and ref and out:
         sections.append(("downscale_rgb row reads", [
-            f"*{out['source_bytes'] / (1 << 20):.2f} MiB of source pixels -> "
+            f"*{_fmt(out['source_bytes'], 'bytes')} of source pixels -> "
             f"{out['new_w']}x{out['new_h']} out*",
             "",
             "| row read | reads | source bytes read | vs one row per output row |",
             "| --- | ---: | ---: | ---: |",
             f"| current: `src[base:base + stride]` | {down['reads']:,} | "
-            f"{down['bytes_read'] / (1 << 20):.2f} MiB | "
+            f"{_fmt(down['bytes_read'], 'bytes')} | "
             f"{down['bytes_read'] / down['one_row_every_output_row']:.2f}x |",
             f"| pre-fix: `src[base:][:stride]` | {ref['reads']:,} | "
-            f"{ref['bytes_read'] / (1 << 20):.0f} MiB | "
+            f"{_fmt(ref['bytes_read'], 'bytes')} | "
             f"{ref['bytes_read'] / ref['one_row_every_output_row']:.0f}x |",
             "",
-            f"* the fix holds the total to roughly `new_h * stride` "
-            f"({down['one_row_every_output_row'] / (1 << 20):.2f} MiB): the loop reads "
+            f"* the fix holds the total to `new_h * stride` = "
+            f"{_fmt(down['one_row_every_output_row'], 'bytes')}: the loop reads "
             f"{down['bytes_read'] / down['one_row_every_output_row']:.2f}x that, and the widest "
             f"single read is {down['widest_read']:,} bytes, which is exactly one source row",
             f"* the pre-fix expression reads the whole remaining tail on every output row: "
-            f"{ref['bytes_read'] / (1 << 20):.0f} MiB, which is "
-            f"{ref['bytes_read'] / down['bytes_read']:.0f}x what the fixed loop copies",
+            f"{_fmt(ref['bytes_read'], 'bytes')}, which is "
+            f"{ref['bytes_read'] / down['bytes_read']:.0f}x what the fixed loop copies, and "
+            f"{ref['bytes_read'] / out['source_bytes']:.0f}x the size of the source itself",
+        ]))
+
+    ratio = facts.get("state_vs_screenshot")
+    if ratio:
+        sections.append(("screen_state against a screenshot", [
+            f"* `screen_state()` : {ratio['screen_state_ms']:.3f} ms",
+            f"* cheapest possible screenshot (16x16, end to end): "
+            f"{ratio['cheapest_screenshot_ms']:.2f} ms "
+            f"({ratio['cheapest_is_x_state']}x the state)",
+            f"* a full-screen screenshot: {ratio['full_screenshot_ms']:.2f} ms "
+            f"({ratio['full_is_x_state']}x the state)",
+        ] + ([
+            f"* one window's facts (title, class, rect): "
+            f"{ratio['one_window_facts_ms'] * 1000:.1f} us",
+        ] if ratio.get("one_window_facts_ms") else []) + [
+            "",
+            "The ordering the argument rests on holds: state is tens to hundreds of times "
+            "cheaper than any screenshot, and a screenshot of anything real is tens of "
+            "milliseconds. The absolute figure does not: a per-window lookup is a few "
+            "microseconds, but `screen_state` walks every top-level window, so the total is "
+            f"{ratio['screen_state_ms'] * 1000:.0f} us, not 'about a microsecond'. It is "
+            "still cheap enough to be worth preferring - it is a rounding error next to a "
+            "capture - but it is a rounding error of the wrong order of magnitude for the "
+            "quote to be left as written.",
         ]))
 
     ratio = facts.get("decode_filter_ratio")
@@ -1492,13 +1572,13 @@ def _fact_sections(facts: dict[str, Any], results: dict[str, Result]) -> list[tu
                             f"{100 * count / total:.0f}% | pure Python per byte |")
             rows.append("")
         if ratio:
+            multiple = ratio["filter1_over_filter0"]
             rows += [
                 "Filter 0 has a zero-cost branch in `_unfilter`; every other filter is a "
-                "per-byte Python loop, so it costs about 20x more:",
+                f"per-byte Python loop, which measured {multiple}x more here:",
                 "",
                 f"* filter 0 : {ratio['filter0_ms']:.2f} ms",
-                f"* filter 1 : {ratio['filter1_ms']:.2f} ms "
-                f"({ratio['filter1_over_filter0']}x)",
+                f"* filter 1 : {ratio['filter1_ms']:.2f} ms ({multiple}x)",
             ]
             if "png_decode_pillow_png" in results and results[
                     "png_decode_pillow_png"].status == "ok":
@@ -1518,6 +1598,23 @@ def _fact_sections(facts: dict[str, Any], results: dict[str, Result]) -> list[tu
                 "keep the pure-Python path as a *last resort* and not as a fast path.",
             ]
         sections.append(("Pure-Python PNG decode", rows))
+
+    pace = facts.get("typing_pacing")
+    if pace:
+        sections.append(("Typing pacing", [
+            f"* `{PACE_CHARS}` characters, `interval=0.008` (the old default): "
+            f"{pace['paced_40_chars_ms']:.2f} ms, which is "
+            f"{pace['quantum_x_paced']:.1f} sleeps' worth of timer quantum at "
+            f"{pace['sleep_quantum_ms']:.3f} ms each",
+            f"* the same loop with `interval=0`: {pace['unpaced_loop_ms']:.4f} ms - the loop, "
+            f"the per-character branch and the interval test, and nothing else",
+            "",
+            "The unpaced number is microseconds, so essentially all of the "
+            "1.47 ms quoted in `type_text`'s docstring would have to be the per-character "
+            "input delivery. This benchmark will not measure that: it would mean typing into "
+            "the user's focused window. The paced number, which is where the latency an agent "
+            "actually feels lives, is measured in full and is the one worth acting on.",
+        ]))
 
     scale = facts.get("scaled_path_speedup")
     if scale:
@@ -1548,15 +1645,21 @@ def _not_measured(results: dict[str, Result], facts: dict[str, Any]) -> list[str
         f"`{PACE_CHARS}`-character `interval=0` figure.** Measuring it means typing into "
         "whatever window the user has focused, so this benchmark does not do it. The "
         "`typing_pace_40_chars_interval_0` row is the loop *without* the injection and is a "
-        "lower bound on the real number, not a measurement of it. The paced row, which is "
-        "where the time actually goes, is measured in full."
+        "lower bound on the real number, not a measurement of it - and it comes out at "
+        "microseconds, which says the quoted figure is almost entirely delivery cost. The "
+        "paced row, which is where the time actually goes, is measured in full."
     )
     out.append(
         "`GetDIBits` separately from the rest of the GDI grab. Splitting it needs a change "
         "to `src/`, which this benchmark does not make, so the grab row is reported whole."
     )
-    if not facts.get("png_decode_pillow_png"):
-        out.append("Pillow was not installed, so no Pillow-written PNG was decoded.")
+    pillow = results.get("png_decode_pillow_png")
+    if pillow is None or pillow.status != "ok":
+        out.append(
+            "No Pillow-written PNG was decoded"
+            + (f": {pillow.reason}" if pillow else ": Pillow is not installed here.")
+            + " The filter histogram and the worst-case `scale_image` row are missing too."
+        )
     out.append(
         "Any machine other than this one. These numbers are a property of this CPU, this "
         "display and this desktop compositor; the JSON records the machine so a number is "

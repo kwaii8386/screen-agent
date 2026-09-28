@@ -266,6 +266,12 @@ the operator's `page_click` verified the navigation by URL rather than by lookin
 Full write-up, the install block, the system prompt, a defensive result parser and the
 honest limits are in [`docs/operator.md`](docs/operator.md).
 
+**If you are writing a prompt that drives this**, read
+[`SKILL/desktop-control.md`](SKILL/desktop-control.md) first. It is the decision table —
+which perception to reach for, when a click will and will not land, how to batch, and the
+conflict protocol for two agents sharing one desktop. Every rule in it was measured here,
+including the ones that are counter-intuitive.
+
 **In a browser** — the `page_*` tools, and no image at all:
 
 1. `page_state()` — which page am I on?

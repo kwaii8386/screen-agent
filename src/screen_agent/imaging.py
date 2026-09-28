@@ -257,7 +257,10 @@ def downscale_rgb(
     if (new_w, new_h) == (width, height):
         return bytes(rgb), width, height
 
-    src = bytes(rgb)
+    # Normalise to `bytes` so `itemgetter` below sees a plain sequence, but keep an
+    # object that already is `bytes`: every in-tree caller decodes to `bytes`, and
+    # re-wrapping would copy the whole 6 MB buffer and hide the row reads.
+    src = rgb if isinstance(rgb, bytes) else bytes(rgb)
     src_stride = width * 3
     out = bytearray(new_w * new_h * 3)
     # byte offsets of the source pixel landing on each output pixel, using the
@@ -267,15 +270,17 @@ def downscale_rgb(
         for x in range(new_w)
         for channel in (0, 1, 2)
     ]
-    pick = itemgetter(*xs) if len(xs) > 1 else _single(xs[0])
+    # new_w is at least 1, so xs always holds at least 3 offsets and itemgetter
+    # always returns a tuple - no single-index special case is needed.
+    pick = itemgetter(*xs)
     for y in range(new_h):
         src_y = min(height - 1, int((y + 0.5) * height / new_h))
-        row = src[src_y * src_stride :][:src_stride]
+        # the row base has to be bounded on BOTH sides. Slicing `src[base:]` and
+        # trimming afterwards copies the whole remaining tail of the buffer (up
+        # to 6 MB per row) and throws all but one row of it away - 1.9 GB of
+        # memcpy for a 1920x1080 -> 640 downscale.
+        base = src_y * src_stride
+        row = src[base : base + src_stride]
         off = y * new_w * 3
         out[off : off + new_w * 3] = pick(row)
     return bytes(out), new_w, new_h
-
-
-def _single(index: int):
-    """``itemgetter`` returns a scalar for a single index; always return a tuple."""
-    return lambda row: (row[index],)

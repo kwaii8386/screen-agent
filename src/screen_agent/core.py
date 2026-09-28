@@ -21,12 +21,43 @@ __all__ = [
     "run",
     "run_capture",
     "scale_image",
+    "frame_fingerprint",
     "scroll_delta",
     "default_shot_dir",
+    "ReportedError",
 ]
 
 
-class ScreenAgentError(RuntimeError):
+class ReportedError(RuntimeError):
+    """An error whose message is written for the agent that will read it.
+
+    This exists because of a measured behaviour of the MCP SDK, not a preference. Both
+    ``mcp`` 1.x and 2.x catch whatever a tool raises and answer with a result the model
+    sees, but they treat two kinds of failure differently:
+
+    * an exception the SDK recognises as deliberate keeps its text - ``"Error executing
+      tool browser_click: no browser is listening on port 9222; start one with
+      --remote-debugging-port=9222 ..."``;
+    * anything else is treated as a crash, and its text stays on the server - the model
+      gets exactly ``"Error executing tool browser_click"`` and nothing else.
+
+    Verified on ``mcp`` 2.x by calling ``browser_click`` with no browser listening: the
+    generic string came back, and every word of the actionable message - the port, the two
+    flags, the reason there is no coordinate fallback - was gone.
+
+    That is fatal for this package's design, which is to raise a message the caller can
+    act on instead of silently guessing a coordinate. A model told "Error executing tool
+    browser_click" retries the same call or takes a screenshot; a model told which flags
+    to set can fix it.
+
+    Inheriting from the SDK's own type directly was the obvious fix and does not work:
+    this module must not import ``mcp`` (it costs ~880 ms and the CLI never needs it), and
+    re-basing the class afterwards is rejected by CPython. So the marker lives here and
+    the translation happens once, at the MCP boundary, in ``mcp_server``.
+    """
+
+
+class ScreenAgentError(ReportedError):
     """Base class for every error raised by screen-agent."""
 
 
@@ -209,6 +240,20 @@ def scale_image(path: Path, max_width: int) -> tuple[int, int]:
     small, new_w, new_h = downscale_rgb(rgb, src_w, src_h, max_width)
     path.write_bytes(encode_png(new_w, new_h, small))
     return new_w, new_h
+
+
+def frame_fingerprint(data: bytes, max_bytes: int = 4096) -> bytes:
+    """A small sample of a pixel buffer, for "did this frame change?" comparisons.
+
+    Deciding whether the screen has settled means comparing this pass to the last one,
+    and comparing 6 MB of pixels costs more than producing them. So take one byte out of
+    every ``len(data) // max_bytes`` and compare that instead (*max_bytes* of 0 samples
+    nothing). It is a stride sample, not a downscale: a change confined to a handful of
+    pixels can slip through, which is the price of a check cheap enough to run between
+    every frame.
+    """
+    step = max(1, len(data) // max_bytes) if max_bytes > 0 else 1
+    return data[::step]
 
 
 def _png_size(path: Path) -> tuple[int, int]:

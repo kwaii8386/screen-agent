@@ -20,9 +20,17 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from screen_agent import core  # noqa: E402
+from screen_agent.backends import base as base_backend  # noqa: E402
 from screen_agent.backends import windows as W  # noqa: E402
-from screen_agent.backends.base import Cursor  # noqa: E402
-from screen_agent.core import Rect, ScreenAgentError, UnsupportedOperation  # noqa: E402
+from screen_agent.backends.base import Backend, Cursor  # noqa: E402
+from screen_agent.core import (  # noqa: E402
+    Rect,
+    ScreenAgentError,
+    UnsupportedOperation,
+    _png_size,
+)
+from screen_agent.imaging import encode_png  # noqa: E402
 from screen_agent.keys import parse_combo  # noqa: E402
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows only")
@@ -39,6 +47,17 @@ class FakeUser32:
         self.position = (500, 400)
         self.fail_after = None
         self.system_cursor_ok = True
+        #: top-level windows in z-order (top first): hwnd -> (title, class, rect)
+        self.windows = {
+            0x100: ("Editor - notes.txt", "Notepad", (10, 20, 800, 600)),
+            0x200: ("Inbox - Mail", "ThunderbirdFrame", (0, 0, 1920, 1080)),
+            0x300: ("", "Progman", (0, 0, 1920, 1080)),
+            0x400: ("Calculator", "ApplicationFrameWindow", (100, 100, 320, 480)),
+            0x500: ("Store", "ApplicationFrameWindow", (0, 0, 900, 700)),
+        }
+        self.foreground = 0x100
+        self.invisible = {0x400}
+        self.cloaked = {0x500}
 
     # -- input ---------------------------------------------------------------
     def SendInput(self, count, array, size):  # noqa: N802 - mirrors the Win32 name
@@ -83,6 +102,41 @@ class FakeUser32:
 
     def GetDesktopWindow(self):  # noqa: N802
         return 0x1234
+
+    # -- screen state --------------------------------------------------------
+    def GetForegroundWindow(self):  # noqa: N802
+        return self.foreground
+
+    def EnumWindows(self, callback, lparam):  # noqa: N802
+        for hwnd in self.windows:  # already z-ordered, top first
+            if not callback(hwnd, lparam):
+                break
+        return 1
+
+    def IsWindowVisible(self, hwnd):  # noqa: N802
+        return 0 if int(hwnd or 0) in self.invisible else 1
+
+    def GetWindowTextLengthW(self, hwnd):  # noqa: N802
+        return len(self._facts(hwnd)[0])
+
+    def GetWindowTextW(self, hwnd, buffer, count):  # noqa: N802
+        title = self._facts(hwnd)[0][: count - 1]
+        buffer.value = title
+        return len(title)
+
+    def GetClassNameW(self, hwnd, buffer, count):  # noqa: N802
+        name = self._facts(hwnd)[1][: count - 1]
+        buffer.value = name
+        return len(name)
+
+    def GetWindowRect(self, hwnd, box):  # noqa: N802 - arrives as byref()
+        x, y, width, height = self._facts(hwnd)[2]
+        box._obj.left, box._obj.top = x, y
+        box._obj.right, box._obj.bottom = x + width, y + height
+        return 1
+
+    def _facts(self, hwnd) -> tuple[str, str, tuple[int, int, int, int]]:
+        return self.windows.get(int(hwnd or 0), ("", "", (0, 0, 0, 0)))
 
     def VkKeyScanW(self, ch):  # noqa: N802 - a US layout is enough for these tests
         """low byte = virtual key, high byte = shift (1), ctrl (2) or alt (4)."""
@@ -543,3 +597,415 @@ def test_info_reports_the_desktop_and_caveats(backend):
     assert info.capabilities["absolute_pointer"] is True
     assert "DPI awareness" in text
     assert "interactive desktop session" in text
+
+
+# ------------------------------------------------------------- fast capture paths
+class FakeDwmapi:
+    """Answers DWMWA_CLOAKED from a set, so the compositor's hidden windows are testable."""
+
+    def __init__(self, cloaked: set[int]) -> None:
+        self.cloaked = set(cloaked)
+
+    def DwmGetWindowAttribute(self, hwnd, attribute, value, size):  # noqa: N802
+        if attribute == W._DWMWA_CLOAKED and int(hwnd or 0) in self.cloaked:
+            value._obj.value = 1  # arrives as a CArgObject from byref()
+        return 0
+
+
+class _CountingClock:
+    """Stands in for the ``asyncio`` module: counts ``sleep`` calls and makes them free.
+
+    Every wait in the backend goes through ``W.asyncio``, so this turns "does the loop
+    actually yield" and "how many passes did it take" into assertions instead of
+    milliseconds.
+    """
+
+    def __init__(self, real) -> None:
+        self._real = real
+        self.slept: list[float] = []
+
+    def sleep(self, delay, *args, **kwargs):
+        self.slept.append(delay)
+        return self._real.sleep(0)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def _frame(fill: int, size: tuple[int, int] = (4, 4)) -> tuple[int, int, bytes]:
+    width, height = size
+    return width, height, bytes([fill]) * (width * height * 3)
+
+
+def _fake_grabs(*frames: tuple[int, int, bytes]):
+    """A ``_grab_rgb`` stand-in that hands out *frames* in turn and records every call.
+
+    It goes on as an instance attribute, so the backend calls it the way it calls the
+    real one: ``grab(rect, *, cursor, max_width)`` with no ``self``.
+    """
+    calls: list[tuple[Rect, bool, int]] = []
+
+    def grab(rect, *, cursor=False, max_width=0):
+        calls.append((rect, cursor, max_width))
+        return frames[(len(calls) - 1) % len(frames)]
+
+    grab.calls = calls
+    return grab
+
+
+def test_capture_scaled_asks_gdi_for_the_small_frame(backend, tmp_path, monkeypatch):
+    """The downscale has to happen in GDI, not in Python.
+
+    StretchBlt into a smaller DIB never materialises the full-size frame, which is
+    116 ms -> 33 ms for a 1920x1080 desktop scaled to 640 px. Encoding 8 MB of PNG and
+    decoding it again - what ``core.scale_image`` does - is the slow path this exists to
+    avoid, so it must not run at all.
+    """
+    def boom(*args, **kwargs):
+        raise AssertionError("the Python rescaler ran for a capture GDI already scaled")
+
+    monkeypatch.setattr(core, "scale_image", boom)
+    monkeypatch.setattr(base_backend, "scale_image", boom)
+
+    backend._grab_rgb = _fake_grabs(_frame(0x2A, (32, 18)))
+    target = tmp_path / "scaled.png"
+    rect = Rect(0, 0, 1920, 1080)
+
+    assert asyncio.run(backend.capture_scaled(target, rect, max_width=32)) == (32, 18)
+    assert backend.last_capture_age_ms == 0  # a fresh grab has no age to report
+    ((grabbed, cursor, width),) = backend._grab_rgb.calls
+    assert (grabbed, cursor, width) == (rect, True, 32)
+    assert _png_size(target) == (32, 18)  # the file is the small frame, not a resize
+
+
+def test_capture_scaled_without_a_width_is_capture_png_byte_for_byte(backend, tmp_path):
+    """With no width asked for, the scaled path must be the old path exactly."""
+    backend._grab_rgb = _fake_grabs(_frame(0x11))
+    plain, scaled = tmp_path / "plain.png", tmp_path / "scaled.png"
+    rect = Rect(0, 0, 4, 4)
+
+    size = asyncio.run(backend.capture_png(plain, rect))
+    again = asyncio.run(backend.capture_scaled(scaled, rect))
+
+    assert plain.read_bytes() == scaled.read_bytes()
+    assert (size, again[:2]) == ((4, 4), (4, 4))
+    assert [call[2] for call in backend._grab_rgb.calls] == [0, 0]  # no downscale asked
+
+
+def test_capture_stable_settles_on_two_identical_frames(backend, tmp_path, monkeypatch):
+    """Two identical frames in a row is the answer; it must stop there."""
+    clock = _CountingClock(asyncio)
+    monkeypatch.setattr(W, "asyncio", clock)
+    backend._grab_rgb = _fake_grabs(_frame(0x22), _frame(0x22))
+    target = tmp_path / "stable.png"
+
+    width, height, settled = asyncio.run(backend.capture_stable(target, Rect(0, 0, 4, 4)))
+
+    assert settled is True
+    assert (width, height) == (4, 4)
+    assert len(backend._grab_rgb.calls) == 2
+    assert clock.slept == [0.040]  # one wait, between the two frames
+    assert _png_size(target) == (4, 4)
+
+
+def test_capture_stable_gives_up_on_a_screen_that_never_stops(backend, tmp_path):
+    """A region that changes on every pass must end on the deadline, not hang."""
+    backend._grab_rgb = _fake_grabs(_frame(0x33), _frame(0x44))  # alternating forever
+    target = tmp_path / "busy.png"
+
+    width, height, settled = asyncio.run(
+        backend.capture_stable(target, Rect(0, 0, 4, 4), timeout_ms=60, poll_ms=1)
+    )
+
+    assert settled is False  # the caller is told, rather than handed a blur as truth
+    assert (width, height) == (4, 4)
+    assert 2 <= len(backend._grab_rgb.calls) < W._STABLE_MAX_ATTEMPTS
+    assert _png_size(target) == (4, 4)  # the last frame is still worth having
+
+
+def test_capture_stable_is_bounded_by_its_attempt_count(backend, tmp_path, monkeypatch):
+    """The deadline is the usual limit; the attempt count is the backstop, and a
+    generous timeout must not turn a never-settling screen into an endless capture."""
+    clock = _CountingClock(asyncio)
+    monkeypatch.setattr(W, "asyncio", clock)
+    backend._grab_rgb = _fake_grabs(_frame(0x55), _frame(0x66))
+    target = tmp_path / "spin.png"
+
+    width, height, settled = asyncio.run(
+        backend.capture_stable(target, Rect(0, 0, 4, 4), timeout_ms=60_000, poll_ms=1)
+    )
+
+    assert settled is False
+    assert (width, height) == (4, 4)
+    assert len(backend._grab_rgb.calls) == W._STABLE_MAX_ATTEMPTS
+    # every pass that continued the loop awaited a sleep, so it can never spin
+    assert len(clock.slept) == W._STABLE_MAX_ATTEMPTS - 1
+
+
+def test_capture_stable_with_no_time_to_wait_takes_one_frame(backend, tmp_path, monkeypatch):
+    clock = _CountingClock(asyncio)
+    monkeypatch.setattr(W, "asyncio", clock)
+    backend._grab_rgb = _fake_grabs(_frame(0x77))
+
+    width, height, settled = asyncio.run(
+        backend.capture_stable(tmp_path / "now.png", Rect(0, 0, 4, 4), timeout_ms=0)
+    )
+
+    assert (width, height, settled) == (4, 4, False)
+    assert len(backend._grab_rgb.calls) == 1
+    assert clock.slept == []  # no time to wait means no waiting
+
+
+def test_screen_state_reports_the_foreground_window_first(backend):
+    backend._dwm = FakeDwmapi(backend.fake.cloaked)
+    state = asyncio.run(backend.screen_state())
+
+    assert state["foreground"] == {
+        "hwnd": 0x100,
+        "title": "Editor - notes.txt",
+        "class": "Notepad",
+        "rect": [10, 20, 800, 600],
+    }
+    assert [window["hwnd"] for window in state["windows"]] == [0x100, 0x200]
+
+
+def test_screen_state_skips_invisible_cloaked_and_untitled_windows(backend):
+    """A suspended UWP app and the desktop window are not what an agent is looking at."""
+    backend._dwm = FakeDwmapi(backend.fake.cloaked)
+    state = asyncio.run(backend.screen_state())
+    titles = [window["title"] for window in state["windows"]]
+
+    assert "Store" not in titles  # cloaked by the compositor
+    assert "Calculator" not in titles  # not visible
+    assert "" not in titles  # untitled (the Progman desktop)
+    assert state["windows"][1] == {
+        "hwnd": 0x200,
+        "title": "Inbox - Mail",
+        "class": "ThunderbirdFrame",
+        "rect": [0, 0, 1920, 1080],
+    }
+
+
+def test_screen_state_keeps_working_without_the_compositor(backend):
+    """dwmapi is missing on older Windows: one extra window must cost, not an exception."""
+    backend._dwm = None
+    state = asyncio.run(backend.screen_state())
+    assert [window["hwnd"] for window in state["windows"]] == [0x100, 0x200, 0x500]
+
+
+def test_screen_state_reports_the_pointer_the_desktop_and_the_dpi_mode(backend):
+    backend._dwm = FakeDwmapi(backend.fake.cloaked)
+    state = asyncio.run(backend.screen_state())
+
+    assert state["cursor"] == {"x": 500, "y": 400}
+    assert state["desktop"] == {"x": 0, "y": 0, "w": 1920, "h": 1080}
+    assert state["dpi"] == {"aware": True, "mode": backend._dpi}
+
+    backend._dpi = "unaware"  # a process that could not switch: clicks land off target
+    assert asyncio.run(backend.screen_state())["dpi"] == {"aware": False, "mode": "unaware"}
+
+
+def test_capture_cache_reuses_a_frame_and_reports_its_age(backend, tmp_path):
+    """Two calls, one grab - and each call is its own event loop, as a CLI would do it."""
+    frames = _fake_grabs(_frame(0x01), _frame(0x02))
+    backend._grab_rgb = frames
+    target = tmp_path / "shot.png"
+    rect = Rect(0, 0, 4, 4)
+
+    first = asyncio.run(backend.capture_scaled(target, rect, max_age_ms=5000))
+    first_age = backend.last_capture_age_ms
+    second = asyncio.run(backend.capture_scaled(target, rect, max_age_ms=5000))
+
+    assert len(frames.calls) == 1
+    # one shape for every backend: the age rides on the attribute, not the return value
+    assert first == (4, 4)
+    assert first_age == 0  # nothing was reused, so there is no age to report
+    assert second == (4, 4)
+    assert 0 <= backend.last_capture_age_ms <= 5000
+
+
+def test_capture_cache_is_off_by_default(backend, tmp_path):
+    """A frame from an earlier call is a frame from an earlier moment: opt in, or not."""
+    frames = _fake_grabs(_frame(0x01), _frame(0x02))
+    backend._grab_rgb = frames
+    target, rect = tmp_path / "shot.png", Rect(0, 0, 4, 4)
+
+    asyncio.run(backend.capture_scaled(target, rect))
+    asyncio.run(backend.capture_scaled(target, rect))
+
+    assert len(frames.calls) == 2
+    assert backend._capture_cache == {}
+
+
+def test_capture_cache_forgets_a_file_the_caller_deleted(backend, tmp_path):
+    frames = _fake_grabs(_frame(0x01), _frame(0x02))
+    backend._grab_rgb = frames
+    target, rect = tmp_path / "shot.png", Rect(0, 0, 4, 4)
+
+    asyncio.run(backend.capture_scaled(target, rect, max_age_ms=5000))
+    target.unlink()
+    width, height = asyncio.run(backend.capture_scaled(target, rect, max_age_ms=5000))
+
+    assert len(frames.calls) == 2  # the entry pointed at a file that no longer exists
+    assert (width, height) == (4, 4)
+
+
+def test_capture_cache_is_keyed_by_path_region_width_and_cursor(backend, tmp_path):
+    """A cached frame only answers the question that was asked of it."""
+    frames = _fake_grabs(_frame(0x01))
+    backend._grab_rgb = frames
+    rect = Rect(0, 0, 4, 4)
+    first, second = tmp_path / "a.png", tmp_path / "b.png"
+
+    async def go():
+        for path, region, width, cursor in (
+            (first, rect, 0, True),
+            (second, rect, 0, True),  # another path
+            (second, Rect(1, 1, 4, 4), 0, True),  # another region
+            (second, rect, 0, False),  # no pointer drawn
+            (second, rect, 2, True),  # another size
+        ):
+            await backend.capture_scaled(
+                path, region, max_width=width, cursor=cursor, max_age_ms=60_000
+            )
+
+    asyncio.run(go())
+    assert len(frames.calls) == 5
+
+
+def test_capture_cache_is_bounded(backend, tmp_path):
+    frames = _fake_grabs(_frame(0x01))
+    backend._grab_rgb = frames
+
+    async def go():
+        for index in range(W._CAPTURE_CACHE_MAX + 4):
+            await backend.capture_scaled(
+                tmp_path / f"{index}.png", Rect(0, 0, 4, 4), max_age_ms=60_000
+            )
+
+    asyncio.run(go())
+    assert len(backend._capture_cache) == W._CAPTURE_CACHE_MAX
+
+
+#: every operation that changes the screen, and must therefore drop the cached frame
+_MUTATIONS = {
+    "move": lambda be: be.move(10, 10),
+    "move_by": lambda be: be.move_by(2, 2),
+    "click": lambda be: be.click(10, 10),
+    "drag": lambda be: be.drag(0, 0, 5, 5, steps=2),
+    "scroll": lambda be: be.scroll(1, "down"),
+    "type_text": lambda be: be.type_text("a"),
+    "key_press": lambda be: be.key_press("a"),
+}
+
+
+@pytest.mark.parametrize("action", sorted(_MUTATIONS))
+def test_every_mutating_action_drops_the_cached_frame(backend, tmp_path, action):
+    """A frame from before an action is what makes an agent click where a button used
+    to be, so no action may leave one in the cache."""
+    frames = _fake_grabs(_frame(0x01), _frame(0x02))
+    backend._grab_rgb = frames
+    target, rect = tmp_path / "shot.png", Rect(0, 0, 4, 4)
+
+    async def go():
+        await backend.capture_scaled(target, rect, max_age_ms=60_000)
+        assert len(frames.calls) == 1
+        await _MUTATIONS[action](backend)
+        await backend.capture_scaled(target, rect, max_age_ms=60_000)
+        assert len(frames.calls) == 2  # a fresh grab, not the frame from before
+        await backend.capture_scaled(target, rect, max_age_ms=60_000)
+
+    asyncio.run(go())
+    assert len(frames.calls) == 2  # and the cache still works afterwards
+
+
+def test_type_text_does_not_sleep_by_default(backend, monkeypatch):
+    """``asyncio.sleep`` quantises to the 15.625 ms Windows tick, so a per-character
+    sleep costs ~16 ms: 40 characters measured 625 ms with one, 1.47 ms without."""
+    clock = _CountingClock(asyncio)
+    monkeypatch.setattr(W, "asyncio", clock)
+
+    assert asyncio.run(backend.type_text("abc")) == 3
+    assert clock.slept == []
+
+    backend.fake.batches.clear()
+    assert asyncio.run(backend.type_text("abc", interval=0.001)) == 3
+    assert clock.slept == [0.001, 0.001, 0.001]  # still there for a caller who wants it
+
+
+# ------------------------------------------------------------------ base defaults
+class _PlainBackend(Backend):
+    """The smallest backend there is: it can capture, and it overrides nothing."""
+
+    async def capture_png(self, path: Path, rect: Rect, cursor: bool = True) -> tuple[int, int]:
+        width, height = max(1, rect.w), max(1, rect.h)
+        path.write_bytes(encode_png(width, height, b"\x30" * (width * height * 3)))
+        return width, height
+
+
+def test_base_capture_scaled_rescales_the_written_file(tmp_path, monkeypatch):
+    """The default keeps the four backends that do not override it working as before:
+    capture at full size, then shrink the file."""
+    seen: list[tuple[str, int]] = []
+
+    def spy(path, max_width):
+        seen.append((str(path), max_width))
+        return core.scale_image(path, max_width)
+
+    monkeypatch.setattr(base_backend, "scale_image", spy)
+    target = tmp_path / "shot.png"
+
+    size = asyncio.run(_PlainBackend().capture_scaled(target, Rect(0, 0, 80, 40), max_width=40))
+
+    assert size == (40, 20)
+    assert seen == [(str(target), 40)]
+    assert _png_size(target) == (40, 20)
+
+
+def test_base_capture_scaled_without_a_width_never_rescales(tmp_path, monkeypatch):
+    def boom(*args, **kwargs):
+        raise AssertionError("a capture at full size must not go through the rescaler")
+
+    monkeypatch.setattr(base_backend, "scale_image", boom)
+    target = tmp_path / "shot.png"
+
+    assert asyncio.run(_PlainBackend().capture_scaled(target, Rect(0, 0, 80, 40))) == (80, 40)
+    assert _png_size(target) == (80, 40)
+
+
+def test_base_screen_state_is_unsupported():
+    with pytest.raises(UnsupportedOperation, match="screen state"):
+        asyncio.run(_PlainBackend().screen_state())
+
+
+def test_capture_png_keeps_its_shape_on_every_backend():
+    """``capture_png`` is called by the CLI, the MCP server and all five backends, so
+    widening it would raise TypeError on the four that declare the 3-argument form.
+    Scaling lives in ``capture_scaled`` instead, which is a new method."""
+    import importlib
+    import inspect
+
+    for module_name, class_name in (
+        ("x11", "X11Backend"),
+        ("mutter", "MutterBackend"),
+        ("macos", "MacOSBackend"),
+        ("wayland_tools", "WaylandToolsBackend"),
+        ("windows", "WindowsBackend"),
+    ):
+        module = importlib.import_module(f"screen_agent.backends.{module_name}")
+        parameters = list(inspect.signature(getattr(module, class_name).capture_png).parameters)
+        assert parameters == ["self", "path", "rect", "cursor"], module_name
+
+
+def test_frame_fingerprint_samples_rather_than_copies():
+    """Deciding whether the screen settled means comparing two 6 MB buffers; comparing
+    a 4 KB stride sample of them is the same question for a thousandth of the bytes."""
+    data = bytes(range(256)) * 256  # 64 KB
+    sample = core.frame_fingerprint(data, max_bytes=1024)
+    assert len(sample) == 1024
+    assert data.startswith(sample[:1])
+
+    tiny = b"abc"
+    assert core.frame_fingerprint(tiny) == tiny  # too small to decimate
+    assert core.frame_fingerprint(b"ab" * 10, max_bytes=0) == b"ab" * 10
+    assert core.frame_fingerprint(b"") == b""

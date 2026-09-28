@@ -8,7 +8,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..core import Rect, ScreenAgentError, UnsupportedOperation
+from ..core import Rect, ScreenAgentError, UnsupportedOperation, scale_image
 
 __all__ = ["Backend", "BackendInfo", "Cursor"]
 
@@ -98,9 +98,45 @@ class Backend(abc.ABC):  # noqa: B024 - a template base: every method has a defa
         return None
 
     # ------------------------------------------------------------------ screen
+    #: Age in milliseconds of the frame ``capture_scaled`` last reused, else 0. Written by
+    #: the backend, read by the server layer to report whether a shot was fresh.
+    last_capture_age_ms: int = 0
+
     async def capture_png(self, path: Path, rect: Rect, cursor: bool = True) -> tuple[int, int]:
         """Write a PNG of *rect* to *path*; return the image size."""
         raise UnsupportedOperation(f"{self.name}: screenshots are not supported")
+
+    async def capture_scaled(
+        self, path: Path, rect: Rect, *, max_width: int = 0, cursor: bool = True
+    ) -> tuple[int, int]:
+        """Write a PNG of *rect* to *path*, no wider than *max_width*; return its size.
+
+        The default captures at full size and rescales the finished file, which is what
+        every backend did before this method existed, so nothing changes by default. A
+        backend that can shrink the pixels while it copies them - GDI's ``StretchBlt`` -
+        overrides this and never encodes the big frame at all, which is several times
+        faster.
+
+        Always a ``(width, height)`` 2-tuple on every backend, with no exceptions: a
+        caller holding a ``Backend`` must not have to know which one it got. A backend
+        that reuses a cached frame leaves that frame's age in ``last_capture_age_ms``
+        instead of widening the return value, because a subclass that answers a
+        different shape from the class it inherits is a trap for every future caller.
+        """
+        width, height = await self.capture_png(path, rect, cursor=cursor)
+        if max_width > 0:
+            return scale_image(path, max_width)
+        return width, height
+
+    async def screen_state(self) -> dict:
+        """What is on the desktop, as facts rather than pixels.
+
+        The cheap alternative to a screenshot: enough structure to decide *where* to
+        look, without paying for a capture or pushing megabytes of image through the
+        agent. Backends that can answer this from their own display server implement
+        it; the rest raise, exactly like every other operation they cannot do.
+        """
+        raise UnsupportedOperation(f"{self.name}: no screen state without a capture")
 
     async def record_video(self, path: Path, seconds: float) -> Path:
         raise UnsupportedOperation(f"{self.name}: screen recording is not supported")

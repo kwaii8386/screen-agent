@@ -3,14 +3,39 @@
 **An MCP server that gives an AI eyes and hands on the local desktop.**
 
 `screenshot` / `screen_record` / `mouse_click` / `type_text` / `key_press` / `mouse_drag` /
-`mouse_scroll` — exposed over the Model Context Protocol, working on **Linux (Wayland and
-X11), macOS and Windows** with no root and no permission dialogs.
+`mouse_scroll` / `screen_state` / `browser_click` — exposed over the Model Context Protocol,
+working on **Linux (Wayland and X11), macOS and Windows** with no root and no permission
+dialogs.
 
 ---
 
 ## Why this exists
 
-Taking a screenshot of a modern desktop from a script is harder than it looks:
+### A screenshot is a last resort, not a first step
+
+The obvious way to drive a desktop from a model is: screenshot, look at it, click a
+coordinate, screenshot again. It works, and it is slow in a way that has nothing to do
+with the screenshot. On a real task — search, read the results, jump to a later page, open
+the third result — that loop took **six minutes across 15 tool calls**, and the capture
+itself was 0.4% of it. What cost the time was 12 full-screen images fed to the model and
+the reasoning each one demanded, plus measuring coordinates off a downscaled picture and
+being off by 5–8%.
+
+So the tools here are ordered by how much they actually tell you per unit of cost:
+
+| | What it gives you | Measured |
+| --- | --- | --- |
+| `screen_state()` | window titles, rectangles, foreground app, pointer — **no pixels** | **0.25 ms** |
+| `browser_elements(sel)` | exact link text, `href` and geometry | **~1 ms** |
+| `browser_click(sel, nth)` | the click, plus a verified before/after of the page | **~1 ms** |
+| `screenshot(region=…)` | pixels | 16 ms (region) / 95 ms (full screen) |
+| `screenshot()` + reading the image | pixels *and* tokens | 95 ms + 1–1.5k tokens |
+
+The same task, run against a local stand-in for a results page, with every click verified
+by URL: **0.88 seconds and zero screenshots**, against roughly 360 seconds and 12 images
+before.
+
+### Capturing a modern desktop is harder than it looks
 
 | Approach | Result |
 | --- | --- |
@@ -25,6 +50,23 @@ The backend that actually works on GNOME/Wayland is **Mutter's own D-Bus API**:
 `org.gnome.Mutter.RemoteDesktop` injects real pointer and keyboard events. That is the
 `mutter` backend here, and it was built after measuring each alternative on a live
 GNOME 46 / Wayland session.
+
+On the perception side the same measuring produced a clear ranking, and two things that
+sound good and are not:
+
+* **Windows UI Automation cannot see web content.** Measured on this machine: zero
+  hyperlinks across three Chrome instances and Cốc Cốc, including with
+  `--force-renderer-accessibility` and after enabling `chrome://accessibility`. It exposes
+  the browser chrome — minimise, back, reload — and nothing below it, at 80–335 ms per
+  walk. It is fine for native Win32 dialogs and useless for the web, which is most of
+  what an agent is asked to drive.
+* **The Chrome DevTools Protocol is exact and costs about a millisecond.** Given a
+  browser started with `--remote-debugging-port`, "the third link on this page, and where
+  to click it" is one `Runtime.evaluate`. No image, no coordinate estimation, no
+  re-measuring.
+* **Lowering the PNG compression level is a trap.** It makes the encode 2.3× faster and
+  the file 38 KiB larger — and larger files mean more tokens, which is the actual
+  bottleneck. It trades a rounding error in the wrong direction.
 
 ---
 
@@ -48,11 +90,13 @@ Optional extras, installed only if you need them:
 | `mutter` | `dbus-next` | GNOME/Wayland screen capture and input |
 | `image` | `pillow` | faster `screenshot(scale=...)` and macOS capture fallbacks |
 | `mss` | `mss` | fast X11 capture |
+| `cdp` | `websockets` | the `browser_*` tools: exact link text, hrefs and clicks in a Chromium browser |
 | `all` | everything above | — |
 
 `screen-agent` itself only hard-depends on `mcp`. On Windows it needs **nothing else**:
 capture is GDI plus a PNG encoder built on `zlib`, and input is `user32.SendInput`
-through `ctypes`.
+through `ctypes`. The `browser_*` tools need the `cdp` extra and a browser you started
+yourself; everything else works without them.
 
 Check what works on *your* machine:
 
@@ -119,18 +163,37 @@ to install it: `{"command": "uvx", "args": ["screen-agent", "serve"]}`.
 
 ## Tools
 
+### Seeing
+
 | Tool | Arguments | What it does |
 | --- | --- | --- |
 | `screen_info` | — | desktop size, active backend, per-capability support |
-| `screenshot` | `path`, `region`, `cursor`, `scale` | PNG of the screen or a `x,y,w,h` region; returns the path |
+| `screen_state` | — | foreground window, visible windows with titles and rects, pointer, DPI mode. **No pixels, no image tokens** |
+| `screenshot` | `path`, `region`, `cursor`, `scale`, `stable`, `stable_timeout_ms`, `max_age_ms` | PNG of the screen or a `x,y,w,h` region; returns the path |
 | `screen_record` | `seconds`, `path` | records the screen to `.webm`/`.mp4` (or `.apng` without ffmpeg) |
+
+### Acting
+
+| Tool | Arguments | What it does |
+| --- | --- | --- |
 | `mouse_move` | `x`, `y`, `cursor` | absolute pointer move, optional shape |
 | `mouse_move_by` | `dx`, `dy` | relative pointer move |
 | `mouse_click` | `x`, `y`, `button`, `clicks` | click, optionally moving first; `clicks=2` double |
 | `mouse_drag` | `x1,y1,x2,y2`, `button`, `steps` | press, drag, release |
 | `mouse_scroll` | `amount`, `direction`, `horizontal` | wheel notches; `up`/`down` mean the same on every backend |
-| `type_text` | `text`, `interval_ms` | types literal text into the focused window |
+| `type_text` | `text`, `interval_ms` | types literal text into the focused window; `interval_ms=0` by default |
 | `key_press` | `keys` | `Return`, `Tab`, `ctrl+c`, `ctrl+shift+t`, `alt+F4`, `+`, `space`, … |
+| `screen_do` | `actions`, `stop_on_error` | runs a list of `{"op": …}` steps in one round trip and reports each |
+
+### Reading a web page
+
+Needs the `cdp` extra and a Chromium browser you started yourself.
+
+| Tool | Arguments | What it does |
+| --- | --- | --- |
+| `browser_state` | — | the active tab's url, title, scroll position, pixel ratio. The cheap way to check whether a click worked |
+| `browser_elements` | `selector`, `nth`, `limit`, `scroll_into_view` | exact text, `href` and geometry for every element a CSS selector matches |
+| `browser_click` | `selector`, `nth`, `scroll_into_view`, `verify`, `method` | clicks the nth match and returns the before/after difference |
 
 Coordinates are absolute pixels with `(0,0)` at the top-left of the whole desktop, as
 reported by `screen_info`. Multi-monitor layouts with a negative origin work; the region
@@ -141,10 +204,87 @@ their own right (`"ctrl++"` is Ctrl and the plus sign), and every named key
 
 ### The loop an agent should run
 
-1. `screenshot()` → get a file path
-2. **read that path** so the model actually sees the pixels
+**In a browser** — the `browser_*` tools, and no image at all:
+
+1. `browser_state()` — which page am I on?
+2. `browser_elements(selector)` — the exact links, with text and hrefs
+3. `browser_click(selector, nth)` — it returns whether the page actually moved
+4. repeat
+
+**For anything else:**
+
+1. `screen_state()` — which window is in front? That is often all you needed to know
+2. `screenshot(region=…)` → **read that path** so the model actually sees the pixels
 3. act — `mouse_click` / `type_text` / `key_press`
-4. `screenshot()` again to verify
+4. `screenshot(stable=True, region=…)` again, cropped to the window that changed
+
+### Two ways this goes wrong, and what the tools do about them
+
+**Photographing a window that is still repainting.** A capture taken immediately after the
+UI changes returns a stale frame — the pixels are from before the change, and every
+coordinate read off it is wrong. `screenshot(stable=True)` re-captures until two
+consecutive frames are identical, and tells you plainly when it gave up and the frame may
+be mid-repaint. It never raises and never hangs.
+
+**Clicking a coordinate that was measured a moment ago.** Between reading a rect and
+clicking it, the window moves or the page reflows. `browser_click` re-measures
+immediately before dispatching, and scrolls the element into view first.
+
+**A frame that is slightly old.** `max_age_ms` reuses a recent capture. It is **off by
+default**, and every action clears the cache, so a frame is never served across a click.
+When one is reused, the reply says how old it was.
+
+### Driving a browser
+
+The `browser_*` tools attach to a Chromium browser (Chrome, Edge, Cốc Cốc) that you
+started with a debug port and a profile of its own:
+
+```bash
+chrome --remote-debugging-port=9222 --user-data-dir=/tmp/agent-browser
+```
+
+**A dedicated profile, on purpose.** `--user-data-dir` cannot be added to a browser that is
+already running — Chrome ignores it and keeps the first instance's settings — so the
+browser has to be started with the flag to begin with. A separate profile means the
+automation gets no access to your cookies and no way to act as you in a logged-in
+session, which is the right default for a tool that clicks things. Point the port at 9223
+with `SCREEN_AGENT_CDP_PORT` if 9222 is taken.
+
+If no browser is listening, these tools **raise an error naming both flags**. They never
+fall back to guessing a coordinate: a click that lands on the wrong link while reporting
+success is worse than an error, because the caller stops checking.
+
+Two limits worth knowing, both found by measurement rather than by reading a spec:
+
+* **An occluded window cannot receive synthetic clicks.** A browser window behind another
+  window reports `document.visibilityState === "hidden"`, and Chrome accepts
+  `Input.dispatchMouseEvent`, returns success, and delivers nothing.
+  `Page.bringToFront` does not help, and neither does raising the window from the agent's
+  process — Windows refuses `SetForegroundWindow` to a background process. So
+  `browser_click` reads `visibilityState` and, when the page is hidden, clicks inside the
+  page instead. The result's `how` field says which was used: `input-event` fired real
+  mouse events, `dom-click` fired none, so a menu that opens on `mousedown` will not
+  respond. Pass `method` to force either.
+* **Elements inside an iframe are not reachable** by a single
+  `document.querySelectorAll`, and a virtualised list may not contain the row you asked
+  for. Both raise. Neither is answered with a guess.
+
+### Batching
+
+`screen_do` takes a list of steps and runs them in order:
+
+```json
+[{"op": "type", "text": "hello"},
+ {"op": "key", "keys": "Return"},
+ {"op": "scroll", "amount": 5},
+ {"op": "wait", "ms": 250}]
+```
+
+It is for steps you already know — typing a string, pressing a sequence of keys. Batching
+trades away the chance to look between actions, so when you are not sure what is on screen,
+take one screenshot and act with the single-action tools. An unknown `op` is rejected
+before the first step runs, because a typo in step 30 should not be discovered after 29
+real clicks.
 
 ---
 
@@ -238,6 +378,16 @@ Nothing to install: `screen-agent` is enough.
 * **Two things are out of reach**, as on every automation tool for Windows: the UAC
   secure desktop, and windows elevated above the agent's own process (UIPI). Run the MCP
   client as the same user and at the same integrity level as the apps you drive.
+* **A screenshot taken right after the UI changes is a stale frame.** The pixels are from
+  before the change, so every coordinate read off it is wrong, and the mistake is
+  invisible — the image looks fine. `screenshot(stable=True)` exists for this: it
+  re-captures until two consecutive frames are identical.
+* **Capture cost is not where the time goes.** A full-screen capture is ~84 ms of which
+  54% is PNG encoding and 33% is `BitBlt`; the file write is 0.4%. `BitBlt` also has a
+  ~12.6 ms fixed stall regardless of area, so a 480×270 region costs nearly as much as the
+  whole screen — but a scaled capture is much cheaper, because GDI's `StretchBlt` shrinks
+  the pixels while copying them and the full-size frame is never encoded at all (47 ms
+  versus 146 ms for 1920×1080 → 640).
 
 ### Permissions on macOS
 
@@ -274,6 +424,23 @@ unit test never would:
   from the keysym, so a bare keysym for `A` or `!` does not produce the shifted character.
   The backend holds Shift for the characters that need it, which is why
   `type_text("Hello World 42!@#")` came out exactly right.
+
+Driving a real browser from Windows added three more, all of which cost a debugging
+session to find:
+
+* **An occluded browser window silently drops synthetic clicks.** See
+  [Driving a browser](#driving-a-browser) — the short version is that `visibilityState`
+  decides, and the tool reports which delivery method it used.
+* **Reading the page right after a navigation returns an empty document.** The click
+  succeeds, the next query finds nothing, and the obvious response is a sleep-and-retry
+  loop that costs a round trip every time. `browser_click` now waits for
+  `document.readyState` itself, bounded, so the next read just works.
+* **asyncio quantises every sleep to the Windows timer tick.** `asyncio.sleep(0.008)`
+  really costs 15.6 ms, so the default 8 ms per-character typing gap made a 40-character
+  string take 625 ms. The default is now no gap, and `type_text`'s parameter is still
+  there for the rare caller who wants to watch it type. The gaps *between* gestures — the
+  double-click interval, the per-step drag interval — are load-bearing and were left
+  alone: they are what lets the target process each event.
 
 ## Implementation notes
 

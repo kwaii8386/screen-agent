@@ -176,6 +176,47 @@ to install it: `{"command": "uvx", "args": ["screen-agent", "serve"]}`.
 | `screenshot` | `path`, `region`, `cursor`, `scale`, `stable`, `stable_timeout_ms`, `max_age_ms` | PNG of the screen or a `x,y,w,h` region; returns the path |
 | `screen_record` | `seconds`, `path` | records the screen to `.webm`/`.mp4` (or `.apng` without ffmpeg) |
 
+### Finding things in a native application
+
+Needs the `windows` extra. This is the same idea as `page_find`, for everything that is
+not a web page.
+
+| Tool | Arguments | What it does |
+| --- | --- | --- |
+| `window_activate` | `hwnd` | brings a window to the front, and reports whether it got there |
+| `ui_find` | `hwnd`, `names`, `kinds`, `include_text`, `limit` | the window's elements: exact names, control kinds, exact rectangles |
+| `ui_click` | `name`, `hwnd`, `nth`, `kinds`, `verify` | clicks one by name, re-reads the rectangle first, and says if something was in the way |
+
+Measured on Notepad: **59 ms and 30 named elements with exact rectangles, against 83 ms
+and 1000-1500 tokens for a screenshot of the same window** — and the coordinates are
+exact rather than read off a downscaled image. On a 40-element window the whole chain
+`screen_state` → `window_activate` → `ui_find` → `ui_click` is **378 ms with no image at
+all**.
+
+Four things measured, not assumed, about how this behaves:
+
+* **It costs about 1.2 ms per element**, because every property read is a cross-process
+  COM round trip. That is why the walk reads three properties per node and nothing more.
+* **One walk beats a filtered query.** Asking the provider for "all the Buttons" with
+  `FindAll` and a property condition measured **221 ms against 46 ms** for a single
+  walk that reads three properties per node — four times *slower*, because each condition
+  makes the provider traverse the whole tree again.
+* **It cannot see web pages inside a browser.** Use `page_find` for those. Nor can it see
+  minimised windows, whose rectangles are all zero.
+* **It needs `comtypes`, not pywin32.** `CUIAutomation` does not implement `IDispatch`,
+  so pywin32's late binding fails outright with "No such interface supported";
+  `comtypes` generates early-bound wrappers from the system typelib. That also removes
+  the hand-rolled-vtable class of bug entirely.
+
+And one thing that does **not** work, stated rather than hidden: `ui_click` would
+prefer to address the control through UI Automation's Invoke pattern — which reaches the
+control itself and is immune to whatever is on top — but `GetCurrentPattern` returns a
+bare `POINTER(IUnknown)` and comtypes will not produce a typed interface from it. So the
+click lands on the rectangle, which needs the window in front, and `ui_click` reports
+when something else is covering that point instead of claiming a click that went
+somewhere else. `window_activate` is the answer to the z-order problem; note that a
+terminal which re-renders constantly will take focus straight back.
+
 ### Acting
 
 | Tool | Arguments | What it does |

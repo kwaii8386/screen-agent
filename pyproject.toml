@@ -42,7 +42,12 @@ image = ["pillow>=9.2"]
 mss = ["mss>=6.1"]
 # browser control over the Chrome DevTools Protocol (screen_agent.cdp / .browser)
 cdp = ["websockets>=12"]
-all = ["dbus-next>=0.2.3", "pillow>=9.2", "mss>=6.1", "websockets>=12"]
+# Exact element names and rectangles for native Windows apps, via UI Automation.
+# Needs comtypes rather than pywin32: CUIAutomation does not implement IDispatch, so
+# late binding fails outright and early-bound wrappers from the system typelib are the
+# only workable route.
+windows = ["comtypes>=1.2"]
+all = ["dbus-next>=0.2.3", "pillow>=9.2", "mss>=6.1", "websockets>=12", "comtypes>=1.2"]
 dev = ["pytest>=7.4", "ruff>=0.6"]
 
 [project.scripts]

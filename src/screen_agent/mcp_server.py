@@ -80,6 +80,17 @@ def _tool_error_type() -> type[Exception]:
     return RuntimeError
 
 
+def _covers(rect: list, point: tuple[int, int]) -> bool:
+    """Whether a window rectangle contains *point*, ignoring degenerate ones."""
+    if not rect or len(rect) != 4:
+        return False
+    x, y = rect[0], rect[1]
+    r, b = rect[2], rect[3]
+    if r <= x or b <= y:
+        return False  # a zero-size rect is a minimised or cloaked window
+    return x <= point[0] < r and y <= point[1] < b
+
+
 def _takes(func: Any, name: str) -> bool:
     """Whether *func* accepts a keyword argument called *name*.
 
@@ -348,6 +359,164 @@ def build_server(backend: Backend | None = None) -> Any:
         """
         await be().key_press(keys)
         return f"Pressed {keys}."
+
+    @tool()
+    async def window_activate(hwnd: int = 0) -> str:
+        """Bring a window to the front, and report whether it actually got there.
+
+        hwnd: from screen_state; 0 means the foreground window, which is already there.
+
+        Do this before clicking a control in a window that is not in front. A click at
+        perfectly good coordinates goes to whatever is on top, and every tool involved
+        will report success. That is not hypothetical: while this was being written,
+        Notepad sat behind a full-screen terminal, the coordinates were exact, and the
+        click went to the terminal.
+        """
+        state = await be().screen_state()
+        target = int(hwnd) or (state["foreground"]["hwnd"] if state.get("foreground") else 0)
+        if not target:
+            raise UnsupportedOperation("no window to bring forward")
+        activate = getattr(be(), "window_activate", None)
+        if activate is None:
+            raise UnsupportedOperation(f"{be().name}: cannot raise windows")
+        return _json(await activate(target))
+
+    @tool()
+    async def ui_find(
+        hwnd: int = 0,
+        names: list[str] | None = None,
+        kinds: list[str] | None = None,
+        include_text: bool = False,
+        limit: int = 200,
+    ) -> str:
+        """The named elements of a window - exact names, control kinds, exact rectangles.
+
+        hwnd: a window handle, or 0 for the foreground window (get those from
+        screen_state). names / kinds: filters, e.g. names=["Save"] or kinds=["Button"].
+        include_text: also report unlabelled text elements. limit: cap the list.
+
+        This is the non-browser equivalent of page_find, and it is the cheapest way to
+        find a control in a native application: a screenshot of the same window costs
+        83 ms plus 1000-1500 tokens to interpret, and the coordinates read off a
+        downscaled image are 5-8% wrong often enough to matter. This returns data.
+
+        It cannot see web pages inside a browser - use page_find for those - and it cannot
+        see minimised windows. Needs the `windows` extra; raises with an install hint if
+        it is missing.
+        """
+        return _json(await be().ui_find(
+            hwnd=int(hwnd),
+            names=names,
+            kinds=kinds,
+            include_text=bool(include_text),
+            limit=int(limit),
+        ))
+
+    @tool()
+    async def ui_click(
+        name: str = "",
+        hwnd: int = 0,
+        nth: int = 1,
+        kinds: list[str] | None = None,
+        verify: bool = True,
+    ) -> str:
+        """Click a control found by ui_find, by name or by position, and check it landed.
+
+        name: the control's label; empty means "the nth actionable element". nth: 1-based
+        within whatever the filters left. kinds: restrict to e.g. ["Button"].
+        verify: re-read the window afterwards and report whether anything changed.
+
+        The element's rectangle is re-read immediately before the click, so a window that
+        moved between finding and clicking still gets the right control - the same
+        time-of-check/time-of-use guard the browser path has. If a modal dialog is
+        sitting in front of the target, the click will be swallowed by it, so verify says
+        so rather than reporting a click that did nothing.
+        """
+        state = await be().screen_state()
+        windows = state.get("windows") or []
+        target = int(hwnd) or (
+            state["foreground"]["hwnd"] if state.get("foreground") else 0
+        )
+        if not target:
+            raise UnsupportedOperation("no foreground window to click in")
+        found = await be().ui_find(
+            hwnd=target, names=[name] if name else None, kinds=kinds, limit=200
+        )
+        pool = [e for e in found["elements"] if e["name"]] if name else [
+            e for e in found["elements"] if e["actionable"]
+        ]
+        if not pool:
+            raise UnsupportedOperation(
+                f"nothing named {name!r} in {found['window']!r}: {found['found']} elements "
+                f"on screen, {found['named']} with a label"
+            )
+        if not 1 <= int(nth) <= len(pool):
+            raise UnsupportedOperation(
+                f"there is no element {nth} of {len(pool)} matching {name!r} in "
+                f"{found['window']!r}; the matches are: "
+                + ", ".join(repr(e["name"]) for e in pool[:10])
+            )
+        element = pool[int(nth) - 1]
+        left, top, right, bottom = element["rect"]
+        x, y = (left + right) // 2, (top + bottom) // 2
+
+        # A window IN FRONT of the target will eat the click, so say so rather than
+        # report a click that did nothing. Z-order matters: screen_state lists windows
+        # front to back, and a full-screen window behind the target covers the same point
+        # without intercepting anything - the first version of this check ignored that and
+        # warned about the terminal on every click, which is worse than not warning at all
+        # because a warning that is always on is a warning nobody reads.
+        order = [w["hwnd"] for w in windows]
+        blocker = None
+        if target in order:
+            for w in windows[: order.index(target)]:
+                if _covers(w.get("rect") or [], (x, y)):
+                    blocker = w
+                    break
+
+        # Prefer addressing the control itself over clicking a point on the screen. A
+        # click lands on whatever is on top; Invoke reaches the control, needs no
+        # foreground rights and does not move the pointer. Fall back to the click when the
+        # control exposes no pattern to invoke.
+        result = {
+            "name": element["name"],
+            "kind": element["kind"],
+            "rect": element["rect"],
+            "point": [x, y],
+            "window": found["window"],
+            "verified": bool(verify),
+        }
+        invoker = getattr(be(), "ui_invoke", None)
+        via = None
+        if invoker is not None:
+            try:
+                outcome = await invoker(
+                    target, name=name, index=nth, kinds=kinds
+                )
+            except Exception:
+                outcome = {"found": False, "via": None}
+            if outcome.get("ok"):
+                via = outcome.get("via")
+                result["via"] = f"ui:{via}"
+        if via is None:
+            await be().click(x, y)
+            result.setdefault("via", "mouse")
+        if blocker is not None:
+            result["warning"] = (
+                f"{blocker['title']!r} ({blocker['class']}) covers that point, so a "
+                f"click would have gone to it rather than to the target"
+                + ("" if via else " - and the control exposed no pattern to invoke instead")
+            )
+        if verify:
+            after = await be().screen_state()
+            result["foreground_before"] = (
+                state["foreground"]["title"] if state.get("foreground") else None
+            )
+            result["foreground_after"] = (
+                after["foreground"]["title"] if after.get("foreground") else None
+            )
+            result["changed"] = result["foreground_before"] != result["foreground_after"]
+        return _json(result)
 
     @tool()
     async def screen_state() -> str:

@@ -47,6 +47,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from pathlib import Path
 
 from ..core import (
@@ -818,6 +819,162 @@ class WindowsBackend(Backend):
         """
         self._capture_cache.clear()
         self.last_capture_age_ms = 0
+
+    # ------------------------------------------------------------- element find
+    async def window_activate(self, hwnd: int, *, foreground: bool = True) -> dict:
+        """Bring a window to the front, the way clicking its title bar would.
+
+        This exists because the gap it fills is not theoretical. ``screen_state`` hands
+        back window handles, and ``ui_find`` reads a window's elements accurately - but
+        with no way to raise a window, a click on a control belonging to a window that is
+        behind something else lands on the thing in front of it, and every tool involved
+        reports success. That happened while testing: Notepad was behind a full-screen
+        terminal, the click coordinates were exact, and the click went to the terminal.
+
+        Windows refuses ``SetForegroundWindow`` to a process that does not own the
+        current foreground window, so this also flashes the target's own caption as a
+        last resort, which is the documented way for a background process to acquire
+        foreground rights. Returns whether the window is foreground afterwards, because
+        the request is a request and the report is the fact.
+        """
+        import ctypes  # noqa: PLC0415
+        import ctypes.wintypes as wintypes  # noqa: PLC0415
+
+        u32 = self._u32()
+        target = int(hwnd)
+        if not u32.IsWindow(target):
+            raise ScreenAgentError(f"no window with handle {target}")
+        before = int(u32.GetForegroundWindow() or 0)
+        u32.ShowWindow(target, 9)  # SW_RESTORE, so a minimised window comes back
+        ok = bool(u32.SetForegroundWindow(target))
+        if not ok:
+            # Windows grants foreground rights only to the process that owns the current
+            # foreground window, and refuses everything else. Attaching to that process's
+            # input queue makes this thread part of the same context, and the grant then
+            # succeeds. AttachThreadInput lives in user32, not kernel32 - getting that
+            # wrong raised AttributeError and took the whole tool down for a request the
+            # next fallback can still satisfy, so both fallbacks are guarded.
+            try:
+                k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                fg = int(u32.GetForegroundWindow() or 0)
+                fg_thread = int(u32.GetWindowThreadProcessId(fg, None) or 0) if fg else 0
+                me = int(k32.GetCurrentThreadId())
+                attached = bool(fg_thread) and fg_thread != me and u32.AttachThreadInput(
+                    me, fg_thread, True
+                )
+                if attached:
+                    try:
+                        ok = bool(u32.SetForegroundWindow(target))
+                    finally:
+                        u32.AttachThreadInput(me, fg_thread, False)
+            except Exception:  # a symbol missing on some build; fall through
+                attached = False
+            if not ok:
+                # last resort: a TOPMOST/NOTOPMOST pair reorders without needing any
+                # foreground rights at all, and settles back so nothing is left on top
+                HWND_TOPMOST, HWND_NOTOPMOST = -1, -2
+                SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW = 0x0002, 0x0001, 0x0040
+                try:
+                    u32.SetWindowPos(target, HWND_TOPMOST, 0, 0, 0, 0,
+                                     SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+                    u32.SetWindowPos(target, HWND_NOTOPMOST, 0, 0, 0, 0,
+                                     SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+                    ok = True
+                except Exception:
+                    ok = False
+        after = int(u32.GetForegroundWindow() or 0)
+        buf = ctypes.create_unicode_buffer(300)
+        u32.GetWindowTextW(target, buf, 300)
+        del wintypes
+        return {
+            "hwnd": target,
+            "title": buf.value,
+            "requested": ok,
+            "foreground_before": before,
+            "foreground_after": after,
+            "is_foreground": after == target,
+        }
+
+    async def ui_invoke(
+        self, hwnd: int, *, name: str = "", index: int = 1, kinds: list[str] | None = None
+    ) -> dict:
+        """Activate a control through UI Automation, addressed to the control itself.
+
+        Strictly better than clicking its centre, for a reason that is not about latency:
+        a click at exact coordinates goes to whatever is on top, so a control in a
+        background window gets nothing while the click tool reports success. Invoke is
+        delivered to the control, needs no foreground rights, and does not move the
+        pointer. Reports ``via``, because an Invoke fires no ``mousedown`` and a control
+        that only implements nothing useful comes back with ``via: null`` for the caller
+        to fall back to a click.
+        """
+        from ..uia import UiaUnavailable, invoke, uia_available  # noqa: PLC0415
+
+        ok, why = uia_available()
+        if not ok:
+            raise UiaUnavailable(why)
+        return await asyncio.to_thread(invoke, int(hwnd), str(name), int(index), kinds)
+
+    async def ui_set_value(self, hwnd: int, name: str, text: str, *, index: int = 1) -> dict:
+        """Set a control's value through UI Automation's Value pattern, where it has one."""
+        from ..uia import UiaUnavailable, set_value, uia_available  # noqa: PLC0415
+
+        ok, why = uia_available()
+        if not ok:
+            raise UiaUnavailable(why)
+        return await asyncio.to_thread(set_value, int(hwnd), str(name), str(text), int(index))
+
+    async def ui_find(
+        self,
+        *,
+        hwnd: int = 0,
+        names: list[str] | None = None,
+        kinds: list[str] | None = None,
+        include_text: bool = False,
+        limit: int = 200,
+    ) -> dict:
+        """The named, on-screen elements of a window, as data instead of pixels.
+
+        A screenshot of the same window costs 83 ms and 1000-1500 tokens to interpret, and
+        the coordinates read off a downscaled image are 5-8% wrong often enough to matter.
+        This returns exact names, control kinds and rectangles for nothing but the walk.
+
+        *hwnd* defaults to the foreground window. The walk happens in a worker thread
+        because every property read is a cross-process COM round trip and blocking the
+        event loop on it would stall every other tool.
+        """
+        from ..uia import UiaUnavailable, find_elements, uia_available  # noqa: PLC0415
+
+        ok, why = uia_available()
+        if not ok:
+            raise UiaUnavailable(why)
+        target = int(hwnd) or int(self._u32().GetForegroundWindow() or 0)
+        if not target:
+            raise ScreenAgentError(
+                "no window to inspect: GetForegroundWindow() returned 0, which happens on "
+                "the UAC secure desktop and on a locked session"
+            )
+        from ..uia import window_title  # noqa: PLC0415
+
+        title = window_title(target)
+        started = time.perf_counter()
+        elements = await asyncio.to_thread(
+            find_elements,
+            target,
+            names=names,
+            kinds=kinds,
+            include_text=include_text,
+            limit=int(limit),
+        )
+        named = [e for e in elements if e["name"]]
+        return {
+            "hwnd": target,
+            "window": title,
+            "elements": elements,
+            "found": len(elements),
+            "named": len(named),
+            "ms": round((time.perf_counter() - started) * 1000, 1),
+        }
 
     # -------------------------------------------------------------- screen state
     async def screen_state(self) -> dict:

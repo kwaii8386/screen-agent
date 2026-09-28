@@ -181,9 +181,74 @@ the whole interaction into one call and perceive only afterwards.**
 
 ---
 
-## 3. The rules that make clicks land
+## 3. Verify the page, never the URL
 
-### 3.1 Move the pointer before you press
+**A URL is a claim the page makes about itself. The rendered content is the fact.**
+
+This is not a stylistic point — it cost a wrong answer on a real task. Navigating to what
+looked like page 10 of a search engine and reading five results produced page 1's results,
+and the only reason it was caught is that the result list looked too good for page one.
+
+### 3.1 Jumping to page N by URL — get the parameter right
+
+Search engines differ, and the off-by-one is silent: a wrong page still returns results, so
+nothing fails, you just get the wrong five links.
+
+| Engine | Parameter | Page 1 | Page 2 | **Page 10** |
+| --- | --- | --- | --- | --- |
+| Bing | `first` (1-based index of the first hit) | `first=1` | `first=11` | **`first=91`** |
+| Google | `start` (0-based index) | `start=0` | `start=10` | `start=90` |
+
+Bing's is 1-based and Google's is 0-based, so the two differ by one. `first=90` is **page 1**
+on Bing; `start=90` is page 10 on Google.
+
+**Prefer clicking the pager over building the URL** when the engine is reachable — the
+pager cannot be off by one. Read the page numbers with `page_find` and click the one whose
+text matches.
+
+### 3.2 Confirm you are on the page you meant
+
+After navigating, check something only the content can tell you — the result-count label,
+a page-number `<span>`, the first and last result's text. On Bing that label reads
+`91-100 of 6,910 results`, which is exactly the assertion you want and costs one
+`page_find`.
+
+```
+page_find("span.sb_count")     # "91-100 of 6,910 results"  <- ground truth
+```
+
+If the label is absent, scroll to the pager and read which number is marked current.
+
+### 3.3 After clicking, verify the destination
+
+`page_click` returns `navigated`, which means **the href changed**. That is necessary and
+not sufficient:
+
+- **Redirect links often do not move the href.** Bing wraps every result in
+  `bing.com/ck/a?...`, so a click can land on a new page while the address bar still
+  shows the results. Verify with the *content* of the new page — its `h1`, its `title` —
+  not with `navigated`.
+- **A same-document change looks identical to a failure.** An SPA can rewrite the whole
+  view without touching the URL. Read a heading and compare it to what you expected.
+
+Report the destination by what you read on the page, and quote it. "The page's heading is
+`Computer use | OpenAI API`" is evidence. "I clicked it" is not.
+
+### 3.4 `dom-click` will not fire a redirect
+
+`page_click` uses `how: dom-click` when the page is occluded — it calls `element.click()`
+inside the page rather than synthesising a mouse event. That is the right default, but a
+**redirect link will not follow it**: there is no navigation, because the redirect needs a
+trusted gesture.
+
+So: **bring the page to the front before clicking anything whose `href` is a redirect.** If
+the result is `how: dom-click` and the link points at `bing.com/ck/a` (or any `/r/`,
+`?url=`, `?u=` wrapper), raise the window and click again. Check `how` before you trust a
+click that mattered.
+
+
+
+### 3.5 Move the pointer before you press
 
 This is the rule that turned WPS from "impossible" into "works".
 
@@ -197,23 +262,45 @@ Measured on WPS: `mouse_click` alone → hover appears, nothing happens. The sam
 after a `mouse_move` → the New button opens. Before this rule, four separate WPS controls
 all failed identically, and I had wrongly concluded the platform could not do it at all.
 
-### 3.2 The window must actually be in front
+### 3.6 The window must actually be in front
 
 `window_activate` returns `requested: true` when its last-resort reorder *ran*, and
-`is_foreground: false` when the window still is not in front. **Check `is_foreground`.**
+`is_foreground: false` when the window still is not in front. **Check `is_foreground`** —
+and note that it can be *stale*: measured, it reported `foreground_after: 0` while the very
+next `screen_state` showed the window correctly in front. The shell settles a moment after
+the call returns, so the reliable check is a fresh `screen_state`, not the activation
+result.
 
 `SetForegroundWindow` is refused to any process that does not own the foreground. When it
-fails, **click the taskbar button** — real input, and it works. Read the button's position
-from a screenshot; it moves as icons are added and removed.
+fails, **click the taskbar button** — real input, and it works.
 
-### 3.3 Re-measure immediately before the click
+**Read the taskbar button's position from a screenshot. Never hardcode it.** Icons shift as
+apps open, close and pin, and a wrong guess lands on a different application entirely —
+measured: a hardcoded coordinate hit Cốc Cốc instead of WPS, and the next guess hit
+Chrome. A taskbar crop is ~680×50 pixels and costs one cheap image.
+
+**Clicking a taskbar button may only open its thumbnail preview**, which is a window with
+an empty title — it is not the switch. Verify the foreground after clicking, and if a
+preview opened, move the pointer away to dismiss it and click again.
+
+### 3.7 Never click a point you have not checked for overlap
+
+`screen_state` returns window rectangles front-to-back. **Before clicking a coordinate,
+check it is not inside the rectangle of a window that is in front of your target.** Two
+windows routinely overlap — a 707×525 WPS home inside a 1300×983 browser — and the click
+goes to the coverer while reporting success.
+
+Check the point against the windows listed *before* your target in the list. If it is
+covered, activate the target first and re-read, because activating may move it.
+
+### 3.8 Re-measure immediately before the click
 
 Between finding a control and clicking it, the window moves, the page reflows, a sticky
 header grows. `ui_click` and `page_click` both re-read the rectangle immediately before
 dispatching. If you take coordinates from a screenshot, the frame is already stale by the
 time you act — see §5.
 
-### 3.4 Verify that something changed
+### 3.9 Verify that something changed
 
 A click reporting success proves the click was *sent*. Use the cheap check:
 

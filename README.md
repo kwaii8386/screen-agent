@@ -3,7 +3,7 @@
 **An MCP server that gives an AI eyes and hands on the local desktop.**
 
 `screenshot` / `screen_record` / `mouse_click` / `type_text` / `key_press` / `mouse_drag` /
-`mouse_scroll` / `screen_state` / `browser_click` — exposed over the Model Context Protocol,
+`mouse_scroll` / `screen_state` / `page_click` — exposed over the Model Context Protocol,
 working on **Linux (Wayland and X11), macOS and Windows** with no root and no permission
 dialogs.
 
@@ -26,8 +26,8 @@ So the tools here are ordered by how much they actually tell you per unit of cos
 | | What it gives you | Measured |
 | --- | --- | --- |
 | `screen_state()` | window titles, rectangles, foreground app, pointer — **no pixels** | **0.25 ms** |
-| `browser_elements(sel)` | exact link text, `href` and geometry | **~1 ms** |
-| `browser_click(sel, nth)` | the click, plus a verified before/after of the page | **~1 ms** |
+| `page_find(sel)` | exact link text, `href` and geometry | **~1 ms** |
+| `page_click(sel, nth)` | the click, plus a verified before/after of the page | **~1 ms** |
 | `screenshot(region=…)` | pixels | 17 ms (480×270) / 83 ms (full screen) |
 | `screenshot()` + reading the image | pixels *and* tokens | 83 ms + 1–1.5k tokens |
 
@@ -94,12 +94,12 @@ Optional extras, installed only if you need them:
 | `mutter` | `dbus-next` | GNOME/Wayland screen capture and input |
 | `image` | `pillow` | faster `screenshot(scale=...)` and macOS capture fallbacks |
 | `mss` | `mss` | fast X11 capture |
-| `cdp` | `websockets` | the `browser_*` tools: exact link text, hrefs and clicks in a Chromium browser |
+| `cdp` | `websockets` | the `page_*` tools: exact link text, hrefs and clicks in a Chromium browser |
 | `all` | everything above | — |
 
 `screen-agent` itself only hard-depends on `mcp`. On Windows it needs **nothing else**:
 capture is GDI plus a PNG encoder built on `zlib`, and input is `user32.SendInput`
-through `ctypes`. The `browser_*` tools need the `cdp` extra and a browser you started
+through `ctypes`. The `page_*` tools need the `cdp` extra and a browser you started
 yourself; everything else works without them.
 
 Check what works on *your* machine:
@@ -195,9 +195,15 @@ Needs the `cdp` extra and a Chromium browser you started yourself.
 
 | Tool | Arguments | What it does |
 | --- | --- | --- |
-| `browser_state` | — | the active tab's url, title, scroll position, pixel ratio. The cheap way to check whether a click worked |
-| `browser_elements` | `selector`, `nth`, `limit`, `scroll_into_view` | exact text, `href` and geometry for every element a CSS selector matches |
-| `browser_click` | `selector`, `nth`, `scroll_into_view`, `verify`, `method` | clicks the nth match and returns the before/after difference |
+| `page_state` | — | the active tab's url, title, scroll position, pixel ratio. The cheap way to check whether a click worked |
+| `page_find` | `selector`, `nth`, `limit`, `scroll_into_view` | exact text, `href` and geometry for every element a CSS selector matches |
+| `page_click` | `selector`, `nth`, `scroll_into_view`, `verify`, `method` | clicks the nth match and returns the before/after difference |
+
+These are named `page_*`, not `page_*`, on purpose. opencode ships its own
+`tools.browser.*` namespace, and a run of the operator below showed why: an agent called
+the *other* browser tool, saw it disconnected, concluded these were broken too, and
+abandoned a working `page_find`. A name collision with the host's own tooling is a design
+defect, not a cosmetic choice.
 
 Coordinates are absolute pixels with `(0,0)` at the top-left of the whole desktop, as
 reported by `screen_info`. Multi-monitor layouts with a negative origin work; the region
@@ -206,13 +212,24 @@ their own right (`"ctrl++"` is Ctrl and the plus sign), and every named key
 `keys.py` knows about resolves on every backend - `tests/test_windows.py` and
 `test_mutter_keysym_tables_cover_every_parsed_key` assert exactly that.
 
-### The loop an agent should run
+### Delegating a goal instead of driving it yourself
 
-**In a browser** — the `browser_*` tools, and no image at all:
+The loop below is 8 tool calls with no images — fine to do directly. It stops being fine
+when a task needs twenty perception steps, or when the screenshots would pile up in the
+main conversation. Then hand the whole thing to an operator subagent and get one JSON
+object back.
 
-1. `browser_state()` — which page am I on?
-2. `browser_elements(selector)` — the exact links, with text and hrefs
-3. `browser_click(selector, nth)` — it returns whether the page actually moved
+Measured, same task both ways: 12 screenshots and 15 tool calls driven directly, versus
+**0 screenshots and 8 tool calls** inside an operator, both ending on the same URL — and
+the operator's `page_click` verified the navigation by URL rather than by looking at it.
+Full write-up, the install block, the system prompt, a defensive result parser and the
+honest limits are in [`docs/operator.md`](docs/operator.md).
+
+**In a browser** — the `page_*` tools, and no image at all:
+
+1. `page_state()` — which page am I on?
+2. `page_find(selector)` — the exact links, with text and hrefs
+3. `page_click(selector, nth)` — it returns whether the page actually moved
 4. repeat
 
 **For anything else:**
@@ -231,7 +248,7 @@ consecutive frames are identical, and tells you plainly when it gave up and the 
 be mid-repaint. It never raises and never hangs.
 
 **Clicking a coordinate that was measured a moment ago.** Between reading a rect and
-clicking it, the window moves or the page reflows. `browser_click` re-measures
+clicking it, the window moves or the page reflows. `page_click` re-measures
 immediately before dispatching, and scrolls the element into view first.
 
 **A frame that is slightly old.** `max_age_ms` reuses a recent capture. It is **off by
@@ -240,7 +257,7 @@ When one is reused, the reply says how old it was.
 
 ### Driving a browser
 
-The `browser_*` tools attach to a Chromium browser (Chrome, Edge, Cốc Cốc) that you
+The `page_*` tools attach to a Chromium browser (Chrome, Edge, Cốc Cốc) that you
 started with a debug port and a profile of its own:
 
 ```bash
@@ -265,7 +282,7 @@ Two limits worth knowing, both found by measurement rather than by reading a spe
   `Input.dispatchMouseEvent`, returns success, and delivers nothing.
   `Page.bringToFront` does not help, and neither does raising the window from the agent's
   process — Windows refuses `SetForegroundWindow` to a background process. So
-  `browser_click` reads `visibilityState` and, when the page is hidden, clicks inside the
+  `page_click` reads `visibilityState` and, when the page is hidden, clicks inside the
   page instead. The result's `how` field says which was used: `input-event` fired real
   mouse events, `dom-click` fired none, so a menu that opens on `mousedown` will not
   respond. Pass `method` to force either.
@@ -437,7 +454,7 @@ session to find:
   decides, and the tool reports which delivery method it used.
 * **Reading the page right after a navigation returns an empty document.** The click
   succeeds, the next query finds nothing, and the obvious response is a sleep-and-retry
-  loop that costs a round trip every time. `browser_click` now waits for
+  loop that costs a round trip every time. `page_click` now waits for
   `document.readyState` itself, bounded, so the next read just works.
 * **asyncio quantises every sleep to the Windows timer tick.** `asyncio.sleep(0.008)`
   really costs 15.6 ms, so the default 8 ms per-character typing gap made a 40-character

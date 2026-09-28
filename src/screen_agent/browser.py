@@ -2,9 +2,9 @@
 
 The three tools an agent actually needs to drive a browser without seeing the screen:
 
-* :func:`browser_state` - one round trip, no side effects: where am I?
-* :func:`browser_elements` - "every link on this page, with its text, href and pixels".
-* :func:`browser_click` - resolve, scroll, **re-measure**, click, and report what changed.
+* :func:`page_state` - one round trip, no side effects: where am I?
+* :func:`page_find` - "every link on this page, with its text, href and pixels".
+* :func:`page_click` - resolve, scroll, **re-measure**, click, and report what changed.
 
 All of it is ~1.1 ms per call where a screenshot is ~95 ms, and what comes back is exact
 rather than inferred. Everything is plain JSON so the MCP layer can hand it straight back
@@ -58,10 +58,10 @@ __all__ = [
     "ElementNotFound",
     "IframeUnsupported",
     "InvalidSelector",
-    "browser_click",
-    "browser_elements",
+    "page_click",
+    "page_find",
     "browser_query",
-    "browser_state",
+    "page_state",
 ]
 
 #: how much text of an element is worth returning
@@ -96,7 +96,7 @@ class IframeUnsupported(ElementNotFound):
 # Marker comments (screen-agent: <name>) let a caller - including the tests - tell the
 # three round trips apart without depending on the rest of the snippet.
 
-#: one cheap, side-effect free read of everything :func:`browser_state` reports
+#: one cheap, side-effect free read of everything :func:`page_state` reports
 STATE_JS = """// screen-agent: state
 (() => {
   return {
@@ -214,7 +214,9 @@ POINT_JS = r"""// screen-agent: point
   };
 })()"""
 
-_SCROLL_CALL = "try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) { /* noop */ }"
+_SCROLL_CALL = (
+    "try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) { /* noop */ }"
+)
 
 DOM_CLICK_JS = r"""// screen-agent: dom click
 (() => {
@@ -271,7 +273,9 @@ def _pick(client: CdpClient | None) -> CdpClient:
 
 def _as_dict(value: Any, what: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise CdpUnavailable(f"{what}: the page returned {type(value).__name__}, expected an object")
+        raise CdpUnavailable(
+            f"{what}: the page returned {type(value).__name__}, expected an object"
+        )
     return value
 
 
@@ -294,7 +298,7 @@ def _element(raw: dict[str, Any], dpr: float) -> dict[str, Any]:
 
 
 # ----------------------------------------------------------------------- public API
-async def browser_state(client: CdpClient | None = None) -> dict[str, Any]:
+async def page_state(client: CdpClient | None = None) -> dict[str, Any]:
     """Where the browser is right now - the cheap verification primitive.
 
     One ``Runtime.evaluate``, no scrolling, no clicking, nothing that can change the
@@ -306,7 +310,7 @@ async def browser_state(client: CdpClient | None = None) -> dict[str, Any]:
     the ``target`` tab this was read from.
     """
     cdp = _pick(client)
-    raw = _as_dict(await cdp.evaluate(STATE_JS, timeout=2.0), "browser_state")
+    raw = _as_dict(await cdp.evaluate(STATE_JS, timeout=2.0), "page_state")
     target = cdp.target
     state: dict[str, Any] = {
         "url": str(raw.get("url") or ""),
@@ -341,7 +345,7 @@ async def browser_query(
 ) -> dict[str, Any]:
     """Every match for *selector*, plus the numbers that explain the misses.
 
-    :func:`browser_elements` is the short form of this; the difference is that this one
+    :func:`page_find` is the short form of this; the difference is that this one
     also reports ``total`` (how many the selector matched at all), ``hidden`` (how many
     were dropped for being zero-sized or invisible), ``truncated``, the frame count and
     the viewport. Those are what turn "found 0 links" from a guess into a diagnosis.
@@ -350,7 +354,7 @@ async def browser_query(
         raise InvalidSelector("selector must be a non-empty CSS selector")
     cdp = _pick(client)
     script = _elements_script(selector, limit=limit, scroll_into_view=scroll_into_view)
-    raw = _as_dict(await cdp.evaluate(script, timeout=3.0), "browser_elements")
+    raw = _as_dict(await cdp.evaluate(script, timeout=3.0), "page_find")
     if raw.get("error") == "invalid-selector":
         raise InvalidSelector(f"{selector!r} is not valid CSS: {raw.get('message') or 'no detail'}")
     dpr = float(raw.get("dpr") or 1.0)
@@ -368,7 +372,7 @@ async def browser_query(
     }
 
 
-async def browser_elements(
+async def page_find(
     selector: str,
     *,
     nth: int | None = None,
@@ -398,7 +402,7 @@ async def browser_elements(
     return [_pick_nth(selector, nth, elements, query)]
 
 
-async def browser_click(
+async def page_click(
     selector: str,
     *,
     nth: int = 1,
@@ -449,7 +453,7 @@ async def browser_click(
     all leave the href alone while everything under it changes. ``changed`` is the wider
     signal (url, title, ready state or scroll position). Both are *evidence*, not proof of
     what happened: if the click mattered, confirm with another
-    :func:`browser_elements` / :func:`browser_state` read, or a screenshot.
+    :func:`page_find` / :func:`page_state` read, or a screenshot.
 
     Raises :class:`ElementNotFound` (or :class:`IframeUnsupported`) when there is no such
     match. There is no coordinate fallback: if the element is not there, this raises.
@@ -457,7 +461,7 @@ async def browser_click(
     if method not in ("auto", "input", "dom"):
         raise BrowserError(f"method must be 'auto', 'input' or 'dom', got {method!r}")
     cdp = _pick(client)
-    before = await browser_state(cdp) if verify else None
+    before = await page_state(cdp) if verify else None
     query = await browser_query(selector, scroll_into_view=scroll_into_view, client=cdp)
     element = _pick_nth(selector, nth, query["elements"], query)
 
@@ -467,10 +471,12 @@ async def browser_click(
             _point_script(selector, element["dom_index"], scroll_into_view=scroll_into_view),
             timeout=2.0,
         ),
-        "browser_click",
+        "page_click",
     )
     if point.get("reason") == "invalid-selector":
-        raise InvalidSelector(f"{selector!r} is not valid CSS: {point.get('message') or 'no detail'}")
+        raise InvalidSelector(
+            f"{selector!r} is not valid CSS: {point.get('message') or 'no detail'}"
+        )
     if not point.get("ok"):
         # The element went away between the two round trips. Say so; do not click blind.
         raise ElementNotFound(
@@ -494,10 +500,8 @@ async def browser_click(
         await cdp.dispatch_mouse_event("mouseReleased", x, y, button="left", click_count=1)
     else:
         clicked = _as_dict(
-            await cdp.evaluate(
-                _dom_click_script(selector, element["dom_index"]), timeout=2.0
-            ),
-            "browser_click",
+            await cdp.evaluate(_dom_click_script(selector, element["dom_index"]), timeout=2.0),
+            "page_click",
         )
         if clicked.get("reason") == "invalid-selector":
             raise InvalidSelector(f"{selector!r} is not valid CSS: {clicked.get('message')}")
@@ -531,7 +535,7 @@ async def browser_click(
     ready = await _wait_for_ready(cdp)
     result["ready_state"] = ready
     try:
-        after = await browser_state(cdp)
+        after = await page_state(cdp)
     except CdpUnavailable as exc:
         # The execution context vanished between the two reads, which is what a real
         # navigation does. Report it instead of pretending the page did not change.
@@ -592,7 +596,9 @@ async def _wait_for_ready(client: CdpClient, *, timeout: float = 2.0) -> str:
         await asyncio.sleep(0.05)
 
 
-def _pick_nth(selector: str, nth: int, elements: list[dict[str, Any]], query: dict[str, Any]) -> dict:
+def _pick_nth(
+    selector: str, nth: int, elements: list[dict[str, Any]], query: dict[str, Any]
+) -> dict:
     """Return the *nth* (1-based) element or raise with what the page actually had."""
     try:
         wanted = int(nth)
@@ -604,8 +610,7 @@ def _pick_nth(selector: str, nth: int, elements: list[dict[str, Any]], query: di
         return elements[wanted - 1]
     hidden = f", {query['hidden']} hidden or zero-sized" if query["hidden"] else ""
     where = (
-        f"{selector!r} matched {query['total']} element(s), "
-        f"{query['found']} of them usable{hidden}"
+        f"{selector!r} matched {query['total']} element(s), {query['found']} of them usable{hidden}"
     )
     if query["found"] == 0 and query["frames"]:
         raise IframeUnsupported(

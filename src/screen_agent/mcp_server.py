@@ -29,28 +29,35 @@ structure of a web page without guessing pixels.
 Cheapest perception first, because a screenshot is the expensive way to learn something \
 that is usually already known exactly:
   1. screen_state()  -> window titles and rectangles, costs microseconds, no image.
-  2. browser_state() / browser_elements(selector) -> exact text, href and geometry of a \
+  2. page_state() / page_find(selector) -> exact text, href and geometry of a \
 link or button in a Chromium browser, also microseconds. Prefer this over a screenshot \
 for anything inside a web page.
   3. screenshot()  -> only when you genuinely need to see pixels. Returns a file path; \
 read that path to actually look at it.
-  4. act           -> browser_click(selector, nth) for page elements, otherwise \
+  4. act           -> page_click(selector, nth) for page elements, otherwise \
 mouse_click / type_text / key_press / mouse_drag / mouse_scroll.
-  5. verify        -> browser_state() or screen_state() to confirm what changed. Far \
+  5. verify        -> page_state() or screen_state() to confirm what changed. Far \
 cheaper than a screenshot, and after a click it says whether the page actually moved.
 
 Coordinates are absolute pixels with (0,0) at the top-left of the desktop, as reported by \
 screen_info(). region is either 'full' or 'x,y,w,h'.
 
-The browser tools need a Chromium browser (Chrome, Edge, CocCoc) started with \
+The page_* tools need a Chromium browser (Chrome, Edge, CocCoc) started with \
 --remote-debugging-port=9222 and its own --user-data-dir. If none is listening they raise \
 an error naming those flags; they never fall back to guessing a coordinate, because a \
 guessed click that lands on the wrong link is worse than an error.
+
+They are the screen-agent tools above, and nothing else does this job. If you have another \
+browser tool from another source in your tool list, it is a different thing with a \
+different connection; do not consult it, and do not conclude from it that these are \
+broken. page_state answers "which page am I on" on its own, and if it raises, the answer \
+is in the error it raises.
 
 This is the user's real, live machine: mouse_click, type_text, key_press and mouse_drag \
 change their session, so only perform actions the user asked for, prefer screenshotting \
 before acting, and verify afterwards.\
 """
+
 
 def _tool_error_type() -> type[Exception]:
     """The SDK's "this failure was deliberate" exception, for either major version.
@@ -171,7 +178,8 @@ def build_server(backend: Backend | None = None) -> Any:
         """Describe the desktop: size, backend in use and what each capability supports."""
         info = await be().info()
         return info.render() + (
-            "\nscreenshot dir : " + str(default_shot_dir())
+            "\nscreenshot dir : "
+            + str(default_shot_dir())
             + "\ntips           : call screenshot(), then read the returned path to see it"
         )
 
@@ -202,9 +210,7 @@ def build_server(backend: Backend | None = None) -> Any:
         little old, which the message reports.
         """
         if stable and max_age_ms:
-            raise UnsupportedOperation(
-                "stable and max_age_ms ask for opposite things; pass one"
-            )
+            raise UnsupportedOperation("stable and max_age_ms ask for opposite things; pass one")
         backend = be()
         rect = parse_region(region, backend.desktop)
         target = shot_path(path)
@@ -312,7 +318,9 @@ def build_server(backend: Backend | None = None) -> Any:
         return f"Dragged ({int(x1)},{int(y1)}) -> ({int(x2)},{int(y2)})."
 
     @tool()
-    async def mouse_scroll(amount: int = 3, direction: str = "down", horizontal: bool = False) -> str:
+    async def mouse_scroll(
+        amount: int = 3, direction: str = "down", horizontal: bool = False
+    ) -> str:
         """Scroll the wheel by `amount` notches: direction is 'up' or 'down' (or left/right)."""
         await be().scroll(int(amount), direction, horizontal)
         return f"Scrolled {direction} {int(amount)}."
@@ -377,7 +385,7 @@ def build_server(backend: Backend | None = None) -> Any:
         )
 
     @tool()
-    async def browser_state() -> str:
+    async def page_state() -> str:
         """The active browser tab's url, title, scroll position and pixel ratio, as JSON.
 
         The cheapest way to find out what a web page is doing, and the cheapest way to
@@ -385,12 +393,12 @@ def build_server(backend: Backend | None = None) -> Any:
         Chromium browser started with --remote-debugging-port=9222 and its own
         --user-data-dir; otherwise it raises rather than guessing.
         """
-        from .browser import browser_state as _state
+        from .browser import page_state as _state
 
-        return _json(_state())
+        return _json(await _state())
 
     @tool()
-    async def browser_elements(
+    async def page_find(
         selector: str, nth: int = 0, limit: int = 50, scroll_into_view: bool = True
     ) -> str:
         """List the elements a CSS selector matches, with exact text, href and geometry.
@@ -403,17 +411,19 @@ def build_server(backend: Backend | None = None) -> Any:
         This is the tool that replaces reading pixels to find a link: it is exact, it
         costs about a millisecond, and it works for elements that are off-screen. The
         x/y/w/h are CSS pixels in the page's own coordinate space; to click at them
-        prefer browser_click, which handles the conversion.
+        prefer page_click, which handles the conversion.
         """
-        from .browser import browser_elements as _elements
+        from .browser import page_find as _elements
 
         if nth > 0:
-            found = await _elements(selector, nth=nth, limit=limit, scroll_into_view=scroll_into_view)
+            found = await _elements(
+                selector, nth=nth, limit=limit, scroll_into_view=scroll_into_view
+            )
             return _json([*found])
         return _json(await _elements(selector, limit=limit, scroll_into_view=scroll_into_view))
 
     @tool()
-    async def browser_click(
+    async def page_click(
         selector: str,
         nth: int = 1,
         scroll_into_view: bool = True,
@@ -438,7 +448,7 @@ def build_server(backend: Backend | None = None) -> Any:
         not there, when it is inside an iframe, or when no browser is listening on the
         debug port.
         """
-        from .browser import browser_click as _click
+        from .browser import page_click as _click
 
         return _json(
             await _click(

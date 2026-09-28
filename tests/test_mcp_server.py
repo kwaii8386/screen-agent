@@ -36,9 +36,9 @@ EXPECTED_TOOLS = {
     "key_press",
     "screen_state",
     "screen_do",
-    "browser_state",
-    "browser_elements",
-    "browser_click",
+    "page_state",
+    "page_find",
+    "page_click",
 }
 
 
@@ -125,7 +125,7 @@ def test_an_actionable_error_survives_the_round_trip_to_the_model():
     This is the whole justification for raising instead of silently falling back, so it
     is checked where it actually happens: over a real stdio session, against a port where
     nothing is listening. Before the wrapper existed this returned the bare string
-    "Error executing tool browser_click" - the model had no idea a browser was the problem,
+    "Error executing tool page_click" - the model had no idea a browser was the problem,
     let alone which two flags to pass.
     """
     import asyncio
@@ -145,7 +145,7 @@ def test_an_actionable_error_survives_the_round_trip_to_the_model():
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.call_tool(
-                    "browser_click", {"selector": "a[href]", "nth": 1}
+                    "page_click", {"selector": "a[href]", "nth": 1}
                 )
                 return _text(result)
 
@@ -194,6 +194,18 @@ class _RecordingBackend:
     async def screen_state(self):
         self.calls.append(("screen_state",))
         return {"foreground": {"title": "recording"}}
+
+    async def info(self):
+        self.calls.append(("info",))
+        from screen_agent.backends.base import BackendInfo
+
+        return BackendInfo(
+            backend="recording",
+            platform="test",
+            session="none",
+            desktop=Rect(0, 0, 1920, 1080),
+            capabilities={"screenshot": True, "mouse": True, "keyboard": True},
+        )
 
 
 def _write_png(path: Path, width: int, height: int) -> None:
@@ -389,10 +401,55 @@ def test_screen_state_is_offered_without_an_image():
     assert json.loads(out)["foreground"]["title"] == "recording"
 
 
+def test_a_missing_await_cannot_return_a_coroutine_as_a_result(monkeypatch):
+    """A tool that forgets to await still returns a string, so nothing else catches it.
+
+    This is not hypothetical: ``page_state`` shipped with ``_json(_state())`` instead of
+    ``_json(await _state())`` and returned the literal text
+    ``"<coroutine object page_state at 0x...>"`` to the model. Every existing test passed,
+    because the value was a perfectly well-formed string. It was only found by an agent
+    reporting that the tool "returned a coroutine object", and it would have made
+    ``page_state`` useless - the tool whose whole job is to be cheap and reliable.
+
+    So the check is behavioural, not structural: with no browser reachable, the tool must
+    raise, and it must never hand back a coroutine's repr.
+    """
+    from screen_agent import browser as browser_mod
+
+    class Awaited(Exception):
+        """Raised only if the coroutine is actually awaited."""
+
+    async def must_be_awaited(client=None):
+        raise Awaited("the tool awaited it")
+
+    monkeypatch.setattr(browser_mod, "page_state", must_be_awaited)
+    server = build_server(_RecordingBackend())
+    with pytest.raises(Awaited):
+        _call(server, "page_state")
+
+
+def test_every_tool_returns_a_string_not_a_coroutine_repr():
+    """Belt and braces: no tool's result may contain a coroutine repr.
+
+    Cheap to assert over the whole tool surface, and it is the shape of the failure that
+    a missing await produces - a valid-looking string that is not the answer.
+    """
+    import asyncio
+
+    server = build_server(_RecordingBackend())
+    for name in ("screen_info", "screen_state", "screen_do"):
+        out = _call(server, name) if name != "screen_do" else _call(
+            server, name, actions=[{"op": "wait", "ms": 1}]
+        )
+        assert isinstance(out, str), name
+        assert "coroutine" not in out, f"{name} returned {out[:80]}"
+    del asyncio
+
+
 def test_instructions_do_not_lead_with_the_screenshot():
     """The model reads the instructions before its first tool call; lead it correctly."""
     from screen_agent.mcp_server import INSTRUCTIONS
 
-    assert "browser_click" in INSTRUCTIONS
+    assert "page_click" in INSTRUCTIONS
     assert "remote-debugging-port" in INSTRUCTIONS
     assert "read that path" in INSTRUCTIONS.lower()  # still told to look at the file

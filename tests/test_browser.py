@@ -35,10 +35,10 @@ from screen_agent.browser import (  # noqa: E402
     ElementNotFound,
     IframeUnsupported,
     InvalidSelector,
-    browser_click,
-    browser_elements,
     browser_query,
-    browser_state,
+    page_click,
+    page_find,
+    page_state,
 )
 from screen_agent.cdp import CdpUnavailable, Target, no_endpoint_help  # noqa: E402
 
@@ -200,7 +200,7 @@ def test_browser_state_reports_the_page_and_the_tab_it_came_from():
         Target(id="T1", type="page", title="Docs", url="https://example.test/docs"),
         Target(id="T2", type="page", title="Other", url="https://other.test/"),
     ])
-    result = asyncio.run(browser_state(client))
+    result = asyncio.run(page_state(client))
     assert result["url"] == "https://example.test/docs"
     assert result["title"] == "Docs"
     assert result["ready_state"] == "complete"
@@ -219,7 +219,7 @@ def test_browser_state_reports_the_page_and_the_tab_it_came_from():
 
 def test_browser_state_is_one_evaluate_and_changes_nothing():
     client = FakeClient()
-    asyncio.run(browser_state(client))
+    asyncio.run(page_state(client))
     assert len(client.expressions) == 1
     assert "screen-agent: state" in client.expressions[0]
     assert client.mouse == []
@@ -230,7 +230,7 @@ def test_browser_state_survives_a_dead_target_list():
         async def list_targets(self) -> list[Target]:
             raise CdpUnavailable("no endpoint")
 
-    result = asyncio.run(browser_state(HalfDead()))
+    result = asyncio.run(page_state(HalfDead()))
     assert result["tab_count"] is None  # informational only, never fatal
     assert result["title"] == "Docs"
 
@@ -290,7 +290,7 @@ def test_elements_are_parsed_into_plain_data():
         raw_element(0, text="Home", href="https://example.test/"),
         raw_element(1, tag="button", text="Sign in", href=None),
     ))
-    result = asyncio.run(browser_elements(SELECTOR, client=client))
+    result = asyncio.run(page_find(SELECTOR, client=client))
     assert [e["text"] for e in result] == ["Home", "Sign in"]
     assert result[0]["href"] == "https://example.test/"
     assert result[1]["href"] is None
@@ -307,7 +307,7 @@ def test_elements_nth_selects_one_element():
     client = FakeClient(elements_payload=elements(
         raw_element(0), raw_element(1), raw_element(2)
     ))
-    only = asyncio.run(browser_elements(SELECTOR, nth=2, client=client))
+    only = asyncio.run(page_find(SELECTOR, nth=2, client=client))
     assert len(only) == 1
     assert only[0]["index"] == 1
 
@@ -324,9 +324,9 @@ def test_query_reports_the_misses_so_an_empty_result_can_be_diagnosed():
 
 def test_an_invalid_selector_raises_instead_of_returning_nothing():
     with pytest.raises(InvalidSelector):
-        asyncio.run(browser_elements("   ", client=FakeClient()))
+        asyncio.run(page_find("   ", client=FakeClient()))
     with pytest.raises(InvalidSelector) as caught:
-        asyncio.run(browser_elements("a[[[", client=FakeClient(elements_payload={
+        asyncio.run(page_find("a[[[", client=FakeClient(elements_payload={
             "error": "invalid-selector", "message": "SyntaxError"
         })))
     assert "SyntaxError" in str(caught.value)
@@ -334,7 +334,7 @@ def test_an_invalid_selector_raises_instead_of_returning_nothing():
 
 def test_hidden_and_zero_sized_elements_are_filtered_by_the_js():
     client = FakeClient(elements_payload=elements(raw_element(0), raw_element(1, dom_index=4)))
-    result = asyncio.run(browser_elements(SELECTOR, client=client))
+    result = asyncio.run(page_find(SELECTOR, client=client))
     script = client.expression_for("elements")
     assert "r.width <= 0 || r.height <= 0" in script
     assert "style.visibility === 'hidden'" in script
@@ -345,7 +345,7 @@ def test_hidden_and_zero_sized_elements_are_filtered_by_the_js():
 # ------------------------------------------------------------------------- click
 def test_click_sends_exactly_one_matched_press_and_release():
     client = FakeClient()
-    asyncio.run(browser_click(SELECTOR, client=client))
+    asyncio.run(page_click(SELECTOR, client=client))
     assert [m["event"] for m in client.mouse] == ["mousePressed", "mouseReleased"]
     assert {(m["x"], m["y"]) for m in client.mouse} == {(70.0, 116.0)}
     assert all(m["button"] == "left" and m["clickCount"] == 1 for m in client.mouse)
@@ -357,7 +357,7 @@ def test_click_dispatches_at_the_re_read_rect_not_the_first_measurement():
         elements_payload=elements(raw_element(0, cx=70.0, cy=116.0)),
         point_payload=point(903.0, 411.0),
     )
-    result = asyncio.run(browser_click(SELECTOR, client=client))
+    result = asyncio.run(page_click(SELECTOR, client=client))
     assert [m["x"] for m in client.mouse] == [903.0, 903.0]
     assert result["point"] == {"x": 903.0, "y": 411.0}
     # state, elements, point, visibilityState, readyState, state - the point is measured,
@@ -368,7 +368,7 @@ def test_click_dispatches_at_the_re_read_rect_not_the_first_measurement():
 
 def test_click_re_reads_and_scrolls_in_both_round_trips():
     client = FakeClient()
-    asyncio.run(browser_click(SELECTOR, scroll_into_view=True, client=client))
+    asyncio.run(page_click(SELECTOR, scroll_into_view=True, client=client))
     assert "el.scrollIntoView(" in client.expression_for("elements")
     assert "el.scrollIntoView(" in client.expression_for("point")
     assert "el.getBoundingClientRect()" in client.expression_for("point")
@@ -376,7 +376,7 @@ def test_click_re_reads_and_scrolls_in_both_round_trips():
 
 def test_click_without_scrolling_asks_for_no_scroll():
     client = FakeClient()
-    asyncio.run(browser_click(SELECTOR, scroll_into_view=False, client=client))
+    asyncio.run(page_click(SELECTOR, scroll_into_view=False, client=client))
     assert "scrollIntoView" not in client.expression_for("point")
     assert client.mouse  # the click still happened
 
@@ -386,7 +386,7 @@ def test_click_verification_returns_the_raw_before_and_after_values():
         state(url="https://example.test/docs", title="Docs"),
         state(url="https://example.test/login", title="Sign in", ready_state="loading"),
     ])
-    result = asyncio.run(browser_click(SELECTOR, client=client))
+    result = asyncio.run(page_click(SELECTOR, client=client))
     assert result["url_before"] == "https://example.test/docs"
     assert result["url_after"] == "https://example.test/login"
     assert result["title_before"] == "Docs"
@@ -399,7 +399,7 @@ def test_click_verification_returns_the_raw_before_and_after_values():
 
 def test_clicking_again_does_not_claim_navigation_when_the_href_is_unchanged():
     client = FakeClient(state_payload=[state(), state()])
-    result = asyncio.run(browser_click(SELECTOR, client=client))
+    result = asyncio.run(page_click(SELECTOR, client=client))
     assert result["url_before"] == result["url_after"] == "https://example.test/docs"
     assert result["title_before"] == result["title_after"] == "Docs"
     assert result["navigated"] is False
@@ -408,14 +408,14 @@ def test_clicking_again_does_not_claim_navigation_when_the_href_is_unchanged():
 
 def test_a_same_href_dom_change_is_reported_as_changed_but_not_navigated():
     client = FakeClient(state_payload=[state(), state(title="Docs (updated)")])
-    result = asyncio.run(browser_click(SELECTOR, client=client))
+    result = asyncio.run(page_click(SELECTOR, client=client))
     assert result["navigated"] is False
     assert result["changed"] is True
 
 
 def test_verification_can_be_turned_off():
     client = FakeClient()
-    result = asyncio.run(browser_click(SELECTOR, verify=False, client=client))
+    result = asyncio.run(page_click(SELECTOR, verify=False, client=client))
     assert result["verified"] is False
     assert "url_before" not in result
     # elements, point, and the one visibilityState read that picks how to click
@@ -430,7 +430,7 @@ def test_a_lost_execution_context_is_reported_rather_than_pretended_away():
                 raise CdpUnavailable("Cannot find context with specified id")
             return await super().evaluate(expression, timeout=timeout)
 
-    result = asyncio.run(browser_click(SELECTOR, client=Navigating()))
+    result = asyncio.run(page_click(SELECTOR, client=Navigating()))
     assert result["url_before"] == "https://example.test/docs"
     assert result["url_after"] is None
     assert result["navigated"] is True
@@ -443,7 +443,7 @@ def test_an_occluded_page_is_clicked_inside_the_page_not_with_a_synthesised_even
     success response. This is the ordinary case - the agent's own terminal is in front -
     so 'auto' must not waste a click on it."""
     client = FakeClient(hidden=True)
-    result = asyncio.run(browser_click(SELECTOR, client=client))
+    result = asyncio.run(page_click(SELECTOR, client=client))
     assert client.mouse == []  # no synthesised event was sent into the void
     assert len(client.dom_clicks) == 1
     assert result["how"] == "dom-click"
@@ -452,7 +452,7 @@ def test_an_occluded_page_is_clicked_inside_the_page_not_with_a_synthesised_even
 
 def test_a_visible_page_still_gets_a_real_mouse_event():
     client = FakeClient(hidden=False)
-    result = asyncio.run(browser_click(SELECTOR, client=client))
+    result = asyncio.run(page_click(SELECTOR, client=client))
     assert [m["event"] for m in client.mouse] == ["mousePressed", "mouseReleased"]
     assert client.dom_clicks == []
     assert result["how"] == "input-event"
@@ -461,13 +461,13 @@ def test_a_visible_page_still_gets_a_real_mouse_event():
 
 def test_the_method_can_be_forced_both_ways():
     forced_dom = FakeClient(hidden=False)
-    assert asyncio.run(browser_click(SELECTOR, method="dom", client=forced_dom))["how"] == (
+    assert asyncio.run(page_click(SELECTOR, method="dom", client=forced_dom))["how"] == (
         "dom-click"
     )
     assert forced_dom.mouse == []
 
     forced_input = FakeClient(hidden=True)
-    assert asyncio.run(browser_click(SELECTOR, method="input", client=forced_input))["how"] == (
+    assert asyncio.run(page_click(SELECTOR, method="input", client=forced_input))["how"] == (
         "input-event"
     )
     assert len(forced_input.mouse) == 2
@@ -475,7 +475,7 @@ def test_the_method_can_be_forced_both_ways():
 
 def test_an_unknown_method_is_refused():
     with pytest.raises(BrowserError) as caught:
-        asyncio.run(browser_click(SELECTOR, method="teleport", client=FakeClient()))
+        asyncio.run(page_click(SELECTOR, method="teleport", client=FakeClient()))
     assert "teleport" in str(caught.value)
 
 
@@ -489,7 +489,7 @@ def test_a_dom_click_that_finds_nothing_raises_rather_than_pretending():
 
     client = Gone(hidden=True)
     with pytest.raises(ElementNotFound) as caught:
-        asyncio.run(browser_click(SELECTOR, client=client))
+        asyncio.run(page_click(SELECTOR, client=client))
     assert "Nothing was clicked" in str(caught.value)
     assert client.mouse == []
 
@@ -498,7 +498,7 @@ def test_a_dom_click_that_finds_nothing_raises_rather_than_pretending():
 def test_clicking_a_missing_nth_raises_and_sends_no_mouse_event():
     client = FakeClient(elements_payload=elements(raw_element(0), raw_element(1)))
     with pytest.raises(ElementNotFound) as caught:
-        asyncio.run(browser_click(SELECTOR, nth=7, client=client))
+        asyncio.run(page_click(SELECTOR, nth=7, client=client))
     assert client.mouse == []
     message = str(caught.value)
     assert "no element 7" in message
@@ -509,7 +509,7 @@ def test_clicking_a_missing_nth_raises_and_sends_no_mouse_event():
 def test_clicking_a_row_a_virtualised_list_never_rendered_raises():
     client = FakeClient(elements_payload=elements(raw_element(0), total=10000, truncated=True))
     with pytest.raises(ElementNotFound) as caught:
-        asyncio.run(browser_click(SELECTOR, nth=9000, client=client))
+        asyncio.run(page_click(SELECTOR, nth=9000, client=client))
     assert "Virtualised" in str(caught.value)
     assert client.mouse == []
 
@@ -517,7 +517,7 @@ def test_clicking_a_row_a_virtualised_list_never_rendered_raises():
 def test_a_page_with_frames_says_so_rather_than_returning_nothing():
     client = FakeClient(elements_payload=elements(total=0, found=0, frames=3))
     with pytest.raises(IframeUnsupported) as caught:
-        asyncio.run(browser_click("a[href]", client=client))
+        asyncio.run(page_click("a[href]", client=client))
     message = str(caught.value)
     assert "iframe" in message
     assert "3 frame" in message
@@ -529,7 +529,7 @@ def test_a_page_with_frames_says_so_rather_than_returning_nothing():
 def test_an_element_that_vanishes_between_the_two_reads_is_not_clicked_blind():
     client = FakeClient(point_payload={"ok": False, "reason": "missing"})
     with pytest.raises(ElementNotFound) as caught:
-        asyncio.run(browser_click(SELECTOR, client=client))
+        asyncio.run(page_click(SELECTOR, client=client))
     assert client.mouse == []
     assert "re-rendered" in str(caught.value)
 
@@ -539,7 +539,7 @@ def test_a_point_outside_the_viewport_is_refused_instead_of_clicked():
         point_payload=point(5000.0, 411.0, viewport={"w": 1280, "h": 720})
     )
     with pytest.raises(ElementNotFound) as caught:
-        asyncio.run(browser_click(SELECTOR, scroll_into_view=False, client=client))
+        asyncio.run(page_click(SELECTOR, scroll_into_view=False, client=client))
     assert "outside" in str(caught.value)
     assert "scroll_into_view=True" in str(caught.value)
     assert client.mouse == []
@@ -573,16 +573,16 @@ def test_no_input_injection_fallback_when_cdp_is_unavailable(monkeypatch):
     dead = FakeClient(error=CdpUnavailable(no_endpoint_help(9222)))
 
     with pytest.raises(CdpUnavailable) as caught:
-        asyncio.run(browser_click(SELECTOR, client=dead))
+        asyncio.run(page_click(SELECTOR, client=dead))
     assert "--remote-debugging-port=9222" in str(caught.value)
     assert "--user-data-dir" in str(caught.value)
     assert injected == []
     assert dead.mouse == []
 
-    for call in (browser_state, browser_elements, browser_query):
+    for call in (page_state, page_find, browser_query):
         with pytest.raises(CdpUnavailable):
-            asyncio.run(call(SELECTOR, client=dead) if call is not browser_state
-                        else browser_state(dead))
+            asyncio.run(call(SELECTOR, client=dead) if call is not page_state
+                        else page_state(dead))
     assert injected == []
 
 
